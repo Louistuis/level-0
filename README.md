@@ -7,10 +7,13 @@ Everyone plays in the same world. It is generated as people walk into it, and a 
 - Play on our own server: https://backrooms.lou15.com
 - Play on WebSim: https://websim.com/p/gm719rh51w5sl1sez08a
 
+(v0.1.0 preview)
 ![Title screen](docs/title.jpg)
 
+(v0.1.0 preview)
 ![A corridor seen through the visor](docs/corridor.jpg)
 
+(v0.1.0 preview)
 ![Not every suit has someone in it](docs/things.jpg)
 
 No build step and no game engine. The level, the light, the textures and every sound are generated in the browser. The only files it loads are its own typeface and a small pack of 3D models (suits, an exit door, a few pieces of furniture), credited in [CREDITS.md](CREDITS.md).
