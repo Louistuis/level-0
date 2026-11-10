@@ -8,7 +8,7 @@
     "binding": "ASSETS",
     "run_worker_first": ["/ws", "/ws/*"]
   },
-  "vars": { "WS_ORIGIN": "https://nordcore.lou15.com/level0" },
+  "vars": { "WS_ORIGIN": "https://lou15.com/level0-mp" },
   "routes": [
     { "pattern": "backrooms.lou15.com", "custom_domain": true }
   ]

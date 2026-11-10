@@ -5,7 +5,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/ws' || url.pathname.startsWith('/ws/')) {
-      const target = env.WS_ORIGIN + url.pathname + url.search;
+      const target = env.WS_ORIGIN + (url.pathname.slice(3) || '/') + url.search;
       const headers = new Headers(request.headers);
       const ip = request.headers.get('CF-Connecting-IP');
       if (ip) headers.set('X-Level0-IP', ip);

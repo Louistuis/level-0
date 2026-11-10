@@ -5,7 +5,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/level0/server
-Environment=PORT=8791
+Environment=PORT=8823
 Environment=HOST=127.0.0.1
 Environment=DATA=/var/lib/level0/level0.json
 Environment=MAX_PER_IP=40
