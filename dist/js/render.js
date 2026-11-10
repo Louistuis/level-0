@@ -26,7 +26,8 @@ export class Renderer {
     this.mDown = mk(DOWN_FS, { tSrc: { value: null }, uTexel: { value: new THREE.Vector2() }, uThresh: { value: 0 } });
     this.mUp = mk(UP_FS, { tSrc: { value: null }, tAdd: { value: null }, uTexel: { value: new THREE.Vector2() } });
     this.fx = {
-      tScene: { value: null }, tBloom: { value: null }, tBlur: { value: null }, uRes: { value: new THREE.Vector2(1, 1) },
+      tScene: { value: null }, tBloom: { value: null }, tBlur: { value: null }, tHalo: { value: null }, uRes: { value: new THREE.Vector2(1, 1) },
+      uSrcTexel: { value: new THREE.Vector2(1, 1) }, uSharpen: { value: 0 }, uPostQ: { value: 1 },
       uTime: { value: 0 }, uExposure: { value: 1.5 }, uGrain: { value: 1 }, uVisor: { value: 1 }, uBreath: { value: 0.1 },
       uCrack: { value: 0 }, uSanity: { value: 1 }, uDamage: { value: 0 }, uDead: { value: 0 }, uFade: { value: 1 }, uBlink: { value: 0 },
     };
@@ -62,6 +63,10 @@ export class Renderer {
     const blur = [rt(w >> 2, h >> 2, false), rt(w >> 3, h >> 3, false), rt(w >> 4, h >> 4, false)];
     this.rts = { scene, down, up, blur, all: [scene, ...down, ...up, ...blur] };
     this.fx.uRes.value.set(outW, outH);
+    this.fx.uSrcTexel.value.set(1 / w, 1 / h);
+    // sharpen more the further we upscale (low 540p, medium 760p, high 1100p)
+    this.fx.uSharpen.value = Math.max(0, Math.min(0.85, (outH / h - 1) * 0.75));
+    this.fx.uPostQ.value = Q.q;
   }
   _pass(mat, target) { this.quad.material = mat; this.r.setRenderTarget(target); this.r.render(this.pscene, this.pcam); }
   render(scene, camera) {
@@ -80,7 +85,7 @@ export class Renderer {
       U.tSrc.value = low.texture; U.tAdd.value = rts.down[i].texture; U.uTexel.value.set(1 / low.width, 1 / low.height);
       this._pass(this.mUp, rts.up[i]); low = rts.up[i];
     }
-    this.fx.tScene.value = rts.scene.texture; this.fx.tBloom.value = rts.up[0].texture; this.fx.tBlur.value = rts.blur[2].texture;
+    this.fx.tScene.value = rts.scene.texture; this.fx.tBloom.value = rts.up[0].texture; this.fx.tBlur.value = rts.blur[2].texture; this.fx.tHalo.value = rts.up[2].texture;
     this._pass(this.mFinal, null);
   }
 }

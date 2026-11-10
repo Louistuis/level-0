@@ -5,3 +5,4 @@ server/data/
 *.log
 .claude/
 .wrangler/
+tools/font/specimen.svg

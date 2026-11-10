@@ -1,0 +1,6 @@
+[
+ { "file": "hazmat-suit.glb", "srcFile": "hazmat_suit.glb", "height": 1.9, "maxTris": 15000, "tex": 1024, "front": [0, 1],
+   "cuts": { "neck": 1.56, "armpit": 1.30, "shoulderCut": 0.19, "handLow": 0.68, "armCut": [[0.68, 0.245], [0.80, 0.235], [1.30, 0.225]], "crotch": 0.89 } },
+ { "file": "operator-suit.glb", "srcFile": "charlie.glb", "height": 1.9, "maxTris": 15000, "tex": 1024, "front": [0, 1],
+   "cuts": { "neck": 1.58, "armpit": 1.22, "shoulderCut": 0.20, "handLow": 0.74, "armCut": [[0.80, 0.285], [1.0, 0.27], [1.22, 0.215]], "crotch": 0.89 } }
+]

@@ -37,12 +37,16 @@ const ui = createUI({
   donateUrl: 'https://www.buymeacoffee.com/louis9987',
   artifacts,
   signs,
+  credits: q.get('credits') === '0' ? [] : [
+    { what: 'Office chair', title: 'Swivel Chair (low poly)', author: 'Example Artist', license: 'CC BY 4.0', url: 'https://example.com/models/swivel-chair' },
+    { what: 'Water cooler', title: 'Water Dispenser', author: 'Another Person', license: 'CC BY 4.0', url: 'https://example.com/a/very/long/path/to/a/model/water-dispenser-0123456789' },
+  ],
   touch: q.get('touch') === '1' ? true : undefined,
 });
 window.ui = ui;
 
 const log = (...a) => console.log('[demo]', ...a);
-['play', 'resume', 'respawn', 'quit', 'setting', 'sign', 'action'].forEach((ev) => ui.on(ev, (...a) => log(ev, ...a)));
+['play', 'resume', 'respawn', 'quit', 'setting', 'sign', 'action', 'map'].forEach((ev) => ui.on(ev, (...a) => log(ev, ...a)));
 
 /* fake engine wiring */
 ui.on('play', () => ui.enterGame());
@@ -51,6 +55,7 @@ ui.on('quit', () => title());
 ui.on('respawn', () => { ui.hideOverlays(); ui.enterGame(); });
 ui.on('setting', (k, v) => { if (k === 'visor') document.getElementById('fake').classList.toggle('hide-visor', !v); });
 ui.on('action', (a) => { if (a === 'pause') ui.showPause(true); if (a === 'sign') ui.openSigns(); if (a === 'flashlight') hud.flashlight = !hud.flashlight; if (a === 'crouch') hud.crouch = !hud.crouch; });
+ui.on('map', () => ui.toast({ title: 'Map', sub: 'The survey map opens here (map.js).', kind: 'info' }));
 ui.on('sign', (id) => ui.toast({ title: 'Chalk left', sub: signs.find((s) => s.id === id).label, kind: 'info' }));
 document.getElementById('fake').classList.toggle('hide-visor', !ui.settings.visor);
 

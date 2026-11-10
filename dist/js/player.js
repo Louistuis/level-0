@@ -1,9 +1,16 @@
 // First person controller on the heightfield: walking, sprinting, crouching,
 // stairs, ledges, head bob and the hand-held flashlight.
 import * as THREE from './three.module.min.js';
-import { S, clamp, damp } from './util.js';
+import { S, SEC_M, clamp, damp } from './util.js';
 
 const R = 0.24, H_STAND = 1.75, H_CROUCH = 1.0, EYE_STAND = 1.62, EYE_CROUCH = 0.92;
+
+// circle (player radius) against an oriented box { x, z, c: cos yaw, s: sin yaw, hx, hz }
+function boxHit(c, x, z) {
+  const dx = x - c.x, dz = z - c.z, lx = dx * c.c - dz * c.s, lz = dx * c.s + dz * c.c;
+  const qx = Math.max(Math.abs(lx) - c.hx, 0), qz = Math.max(Math.abs(lz) - c.hz, 0);
+  return qx * qx + qz * qz < R * R;
+}
 
 export class Player {
   constructor(world, camera) {
@@ -36,7 +43,19 @@ export class Player {
       if (c - Math.max(f, feet) < h) return null;
       if (f > g) g = f;
     }
+    if (this.blocked(x, z)) return null;
     return g;
+  }
+  // furniture from the model pack: oriented boxes in SectorProps.colliders (one we already overlap is ignored)
+  blocked(x, z) {
+    const w = this.world; if (!w.sec) return false;
+    const sx0 = Math.floor((x - R) / SEC_M), sx1 = Math.floor((x + R) / SEC_M), sz0 = Math.floor((z - R) / SEC_M), sz1 = Math.floor((z + R) / SEC_M);
+    for (let sz = sz0; sz <= sz1; sz++) for (let sx = sx0; sx <= sx1; sx++) {
+      const s = w.sec(sx, sz), cl = s && s.props && s.props.colliders;
+      if (!cl) continue;
+      for (const c of cl) if (boxHit(c, x, z) && !boxHit(c, this.x, this.z)) return true;
+    }
+    return false;
   }
 
   update(dt, inp, set) {

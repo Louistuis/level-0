@@ -19,6 +19,24 @@ const smoothstep = (e0, e1, x) => {
   const t = clamp((x - e0) / (e1 - e0));
   return t * t * (3 - 2 * t);
 };
+const wpick = (list) => {
+  let tot = 0;
+  for (const it of list) tot += Math.max(0, it[1]);
+  let r = Math.random() * tot;
+  for (const it of list) { r -= Math.max(0, it[1]); if (r <= 0) return it[0]; }
+  return list[0][0];
+};
+
+// Equal-power crossfade curves for the noise beds (uncorrelated grains: sin^2 + cos^2 = 1).
+const FADE_IN = new Float32Array(64);
+const FADE_OUT = new Float32Array(64);
+for (let i = 0; i < 64; i++) {
+  FADE_IN[i] = Math.sin((i / 63) * Math.PI / 2);
+  FADE_OUT[i] = Math.cos((i / 63) * Math.PI / 2);
+}
+
+// Dissonant chord shapes (semitones over the root) for the slow tonal undertow.
+const CHORDS = [[0, 1, 7, 12], [0, 6, 13, 18], [0, 3, 6, 11], [0, 1, 5, 13], [-12, 0, 6, 7], [0, 2, 8, 13], [-5, 0, 1, 6]];
 
 // Formant targets [F1, F2, F3] in Hz for a neutral adult tract.
 const VOWELS = {
@@ -40,6 +58,8 @@ const SEND = {
   flashOn: 0, flashOff: 0, pickup: 0.05, drink: 0, battery: 0.04, discover: 0.55, artifact: 0.6, sign: 0.08,
   hit: 0.1, death: 0.4, respawn: 0.15, exit: 0.6, stinger: 0.5, apparition: 0.9, knock: 0.55, doorSlam: 0.95,
   geiger: 0, radio: 0.05, _thud: 0.95, _drag: 0.9, _pipe: 0.9, _foot: 0.08, _lamp: 0.25,
+  _creak: 0.85, _metal: 0.9, _farTone: 1.1, _farSteps: 0.75, _clunk: 0.6,
+  radarSweep: 0, radarBlip: 0.04, radarGhost: 0.08, radarOn: 0, radarOff: 0,
 };
 
 function detectMobile() {
@@ -61,7 +81,14 @@ export class AudioEngine {
     this._masterVol = 0.8;
     this._paused = false;
     this._L = { x: 0, y: 1.6, z: 0, fx: 0, fy: 0, fz: -1 };
-    this._s = { hum: 0.6, room: 0.4, exertion: 0, fear: 0, sanity: 1, dark: 0, blackout: 0, dead: false };
+    this._s = { hum: 0.6, room: 0.4, exertion: 0, fear: 0, sanity: 1, dark: 0, blackout: 0, dead: false, menu: false };
+    this._mk = 0; // smoothed menu amount, 0 = gameplay, 1 = title screen
+    this._mkInit = false;
+    this._e = {}; // effective state after the menu blend
+    this._bedList = [];
+    this._follow = null;
+    this._hushPlan = false;
+    this._hushOn = false;
     this._ents = new Map();
     this._vox = new Map();
     this._mics = [];
@@ -72,7 +99,7 @@ export class AudioEngine {
     this._wasDead = false;
     this._br = { next: 0, off: false };
     this._hb = { next: 0 };
-    this._distT = rnd(15, 40);
+    this._distT = rnd(6, 16);
     this._sanT = rnd(8, 20);
     this._curves = {};
     this._tex = {};
@@ -213,10 +240,29 @@ export class AudioEngine {
       st.dark = clamp(num(s.dark, st.dark));
       st.blackout = clamp(num(s.blackout, st.blackout));
       st.dead = !!s.dead;
-      this._beds(now, st);
-      this._breathTick(now, st);
-      this._heartTick(now, st);
-      this._events(dt, st);
+      st.menu = !!s.menu;
+      // Title screen blend: jump straight in on the very first frame, crossfade (about 2.5 s) after that.
+      if (!this._mkInit) { this._mkInit = true; this._mk = st.menu ? 1 : 0; }
+      const mt = st.menu ? 1 : 0;
+      this._mk = clamp(this._mk + clamp(mt - this._mk, -dt / 2.5, dt / 2.5));
+      const mk = this._mk, e = this._e;
+      // On the title screen the game state is ignored: a fixed, distant, slightly dim mood.
+      e.hum = lerp(st.hum, 0.55, mk);
+      e.room = lerp(st.room, 0.8, mk);
+      e.exertion = st.exertion * (1 - mk);
+      e.fear = st.fear * (1 - mk);
+      e.sanity = lerp(st.sanity, 1, mk);
+      e.dark = lerp(st.dark, 0.3, mk);
+      e.blackout = st.blackout * (1 - mk);
+      e.dead = st.dead && !st.menu;
+      e.menu = st.menu;
+      e.mk = mk;
+      try { this._bedsTick(now); } catch (x) { this._err(x); }
+      this._beds(now, e);
+      try { this._ambTick(now, dt, e); } catch (x) { this._err(x); }
+      this._breathTick(now, e);
+      this._heartTick(now, e);
+      this._events(dt, e);
       for (const e of this._ents.values()) {
         e.wt -= dt;
         if (e.wt <= 0) {
@@ -372,8 +418,12 @@ export class AudioEngine {
     lim.attack.value = 0.002; lim.release.value = 0.12;
     this.masterG = this._gain(this._masterVol);
     this._chain(this.mix, box, box2, hoodLP, this.deadLP, this.pauseG, comp, lim, this.masterG, c.destination);
+    this.comp = comp;
     this.uiBus = this._gain(0.8);
     this.uiBus.connect(comp);
+    // Ambience bus (hum, room tone, drones): one gain so the building can 'hold its breath' before an event.
+    this.amb = this._gain(1);
+    this.amb.connect(this.mix);
 
     // Listener up vector is fixed.
     try {
@@ -409,8 +459,10 @@ export class AudioEngine {
       for (let i = 0; i < n; i++) d[i] = (tmp[i] - mean) * g;
       return b;
     };
-    this._white = mk(2, (d) => { for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; }, false);
-    this._pink = mk(4, (d) => {
+    // Long noise tables with mutually prime-ish lengths. The beds never play them as plain loops: see _mkBed.
+    const k = this._mobile ? 1 : 2;
+    this._white = mk(6.1 * k, (d) => { for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1; }, true);
+    this._pink = mk(7.3 * k, (d) => {
       let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
       for (let i = 0; i < d.length; i++) {
         const w = Math.random() * 2 - 1;
@@ -421,7 +473,7 @@ export class AudioEngine {
         b6 = w * 0.115926;
       }
     }, true);
-    this._brown = mk(4, (d) => {
+    this._brown = mk(8.9 * k, (d) => {
       let b = 0;
       for (let i = 0; i < d.length; i++) {
         b = (b + 0.02 * (Math.random() * 2 - 1)) / 1.02;
@@ -445,7 +497,11 @@ export class AudioEngine {
       return 0.045 * (n % 2 ? 0.5 : 1) * Math.exp(-(n - 9) / 22) * rnd(0.4, 1);
     });
     this._buzzWave = this._mkWave(40, (n) => (1 / n) * (n % 2 ? 1 : 0.55));
+    // Harsher, more nasal ballast: strong odd harmonics in the 1 to 3 kHz region.
+    this._buzzWave2 = this._mkWave(40, (n) => (n % 2 ? 1 : 0.3) / Math.pow(n, 0.75) * (n > 6 && n < 26 ? 1.4 : 1));
     this._glotWave = this._mkWave(48, (n) => 1 / Math.pow(n, 1.45), true);
+    // Soft, reedy pad voice: a few harmonics so the undertow is heard on small speakers, not only felt.
+    this._padWave = this._mkWave(10, (n) => (n > 8 ? 0 : 1 / Math.pow(n, 0.75)) * (n % 2 ? 1 : 0.8));
   }
 
   _shortBuf(sec, fn) {
@@ -541,98 +597,176 @@ export class AudioEngine {
     this._chain(erM, this._bq('lowpass', 3200, 0.5), this.erG, this.mix);
   }
 
-  _buildHum() {
-    const c = this.ctx;
-    const m = c.createChannelMerger(2);
-    this._humOsc = [];
-    const add = (type, f, g, chs) => {
-      const o = this._osc(type, f), gn = this._gain(g);
-      o.connect(gn);
-      for (const ch of chs) gn.connect(m, 0, ch);
-      o.start();
-      this._humOsc.push(o);
-      return o;
-    };
-    // Detuned pairs per ear give a very slow beating that wanders between the ears.
-    add(this._humWave, 60.0, 0.5, [0]);
-    add(this._humWave, 60.035, 0.5, [1]);
-    add('sine', 119.93, 0.3, [0]);
-    add('sine', 120.07, 0.3, [1]);
-    add('sine', 180.04, 0.06, [0, 1]);
-    add('sine', 239.9, 0.05, [0]);
-    add('sine', 240.12, 0.05, [1]);
+  // ---------------------------------------------------------------- non-repeating noise beds
 
-    // Ballast buzz: rich 120 Hz, bandpassed into the kHz range, fluttering slowly.
-    const buzz = add(this._buzzWave, 120, 1, []);
-    buzz.disconnect();
-    const buzzAM = this._gain(0.6), buzzG = this._gain(0.3);
-    this._chain(buzz, this._bq('bandpass', 2300, 0.55), buzzAM, buzzG);
-    buzzG.connect(m, 0, 0);
-    const bd = c.createDelay(0.01);
-    bd.delayTime.value = 0.0007;
-    buzzG.connect(bd); bd.connect(m, 0, 1);
-    for (const [f, d] of [[0.71, 0.22], [0.113, 0.18], [3.3, 0.05]]) {
-      const l = this._osc('sine', f), lg = this._gain(d);
-      l.connect(lg); lg.connect(buzzAM.gain); l.start();
-    }
-
-    // Tube hiss, decorrelated per ear.
-    for (const ch of [0, 1]) {
-      const n = this._loop(this._white), g = this._gain(0.03);
-      this._chain(n, this._bq('bandpass', 5200 + ch * 400, 0.5), g);
-      g.connect(m, 0, ch);
-      n.start(0, rnd(0, 1.9));
-    }
-
-    this.humLP = this._bq('lowpass', 7000, 0.5);
-    const wob = this._gain(1);
-    const wl = this._osc('sine', 0.09), wg = this._gain(0.04);
-    wl.connect(wg); wg.connect(wob.gain); wl.start();
-    this.humG = this._gain(0);
-    this._chain(m, this.humLP, wob, this.humG, this.mix);
-    const hs = this._gain(0.12);
-    this.humG.connect(hs); hs.connect(this.revIn);
+  // A bed plays a long noise table as a sequence of grains: every few seconds a new looped source starts at
+  // a random offset with a slightly different playback rate, equal-power crossfaded with the previous one.
+  // Nothing is ever replayed with the same alignment, so there is no loop period to hear. If update() stops
+  // (hidden tab) the last grain just keeps looping its long table.
+  _mkBed(buf, dest, seg, rate, xf) {
+    const bed = { buf, dest, seg: seg || [4, 9], rate: rate || [0.93, 1.07], xf: xf || 1.6, cur: null, next: 0 };
+    this._bedList.push(bed);
+    this._bedGrain(bed, this.ctx.currentTime, true);
+    return bed;
   }
 
-  _buildRoom() {
+  _bedGrain(bed, t, first) {
+    const s = this.ctx.createBufferSource();
+    s.buffer = bed.buf;
+    s.loop = true;
+    s.playbackRate.value = rnd(bed.rate[0], bed.rate[1]);
+    const g = this._gain(first ? 1 : 0);
+    s.connect(g); g.connect(bed.dest);
+    if (!first) g.gain.setValueCurveAtTime(FADE_IN, t, bed.xf);
+    s.start(t, rnd(0, bed.buf.duration * 0.97));
+    const old = bed.cur;
+    if (old) {
+      try { old.g.gain.setValueCurveAtTime(FADE_OUT, t, bed.xf); } catch (e) { old.g.gain.setTargetAtTime(0, t, bed.xf / 3); }
+      old.s.onended = () => { try { old.s.disconnect(); old.g.disconnect(); } catch (e) { /* ignore */ } };
+      try { old.s.stop(t + bed.xf + 0.05); } catch (e) { /* ignore */ }
+    }
+    bed.cur = { s, g };
+    bed.next = t + bed.xf + rnd(bed.seg[0], bed.seg[1]);
+  }
+
+  _bedsTick(now) {
+    for (const bed of this._bedList) {
+      if (now < bed.next - 0.25) continue;
+      try {
+        this._bedGrain(bed, Math.max(now + 0.05, bed.next), false);
+      } catch (e) {
+        this._err(e);
+        bed.next = now + 5;
+      }
+    }
+  }
+
+  // ---------------------------------------------------------------- ambience graph
+
+  // Fluorescent lamps. Mains 60/120 Hz kept low and identical in both ears (the old detuned pairs beat into a
+  // slow 7 s throb in mono). The character lives in three ballast 'fixtures' (120 Hz buzz shaped into the
+  // 0.4 to 3 kHz range, panned apart) plus a gritty 120 Hz-modulated noise sizzle. _ambTick makes it breathe:
+  // per-fixture level drift, slow timbre changes, ballast flutter and short dropouts.
+  _buildHum() {
     const c = this.ctx;
-    // Brown noise air, two offsets of the same loop for width.
+    this._humOsc = [];
+    const sum = this._gain(1);
+    this.humDrop = this._gain(1);
+    this.humLP = this._bq('lowpass', 7000, 0.5);
+    this.humG = this._gain(0);
+    this._chain(sum, this.humDrop, this.humLP, this.humG, this.amb);
+    const hs = this._gain(0.14);
+    this.humG.connect(hs); hs.connect(this.revIn);
+
+    // Mains, mono.
+    this.mainsG = this._gain(0.2);
+    this.mainsG.connect(sum);
+    const o60 = this._osc(this._humWave, 60), g60 = this._gain(0.55);
+    o60.connect(g60); g60.connect(this.mainsG); o60.start();
+    const o120 = this._osc('sine', 120), g120 = this._gain(0.3);
+    o120.connect(g120); g120.connect(this.mainsG); o120.start();
+    this._humOsc.push(o60, o120);
+
+    // Ballast fixtures.
+    this._fix = [];
+    const pans = [-0.6, 0.5, 0.05];
+    for (let i = 0; i < 3; i++) {
+      const o = this._osc(i === 1 ? this._buzzWave2 : this._buzzWave, 120 * (1 + rnd(-0.0005, 0.0005)));
+      const bp = this._bq('bandpass', rnd(900, 2400), rnd(0.55, 1));
+      const body = this._bq('peaking', rnd(380, 620), 1.1, 4);
+      const am = this._gain(1), lv = this._gain(0.7);
+      this._chain(o, bp, body, am, lv);
+      let pan = null;
+      try { pan = c.createStereoPanner(); pan.pan.value = pans[i]; } catch (e) { pan = null; }
+      if (pan) { lv.connect(pan); pan.connect(sum); } else lv.connect(sum);
+      o.start();
+      this._humOsc.push(o);
+      this._fix.push({ o, bp, am, lv, next: 0 });
+    }
+    // The far fixture sits behind a wall: darker.
+    this._fix[2].bp.frequency.value = 650;
+
+    // Sizzle: noise ring-modulated by the ballast wave. The crackly electric fizz of old tubes.
+    const szIn = this._gain(1);
+    const szAM = this._gain(0);
+    const zm = this._osc(this._buzzWave, 120), zg = this._gain(0.6);
+    zm.connect(zg); zg.connect(szAM.gain); zm.start();
+    this._humOsc.push(zm);
+    this.sizzleG = this._gain(0.07);
+    this._chain(szIn, this._bq('bandpass', 2800, 0.7), szAM, this.sizzleG, sum);
+    this._mkBed(this._white, szIn, [5, 10]);
+
+    // Tube hiss, decorrelated per ear.
     const m = c.createChannelMerger(2);
     for (const ch of [0, 1]) {
-      const n = this._loop(this._brown);
-      n.connect(m, 0, ch);
-      n.start(0, rnd(0, 3.9));
+      const g = this._gain(1);
+      g.connect(m, 0, ch);
+      this._mkBed(this._white, g, [4, 9]);
+    }
+    this._chain(m, this._bq('bandpass', 5000, 0.6), this._gain(0.022), sum);
+  }
+
+  // Room tone: air whose colour follows room size, low rumble, a ventilation system that switches on and off,
+  // and an occasional thin duct whistle.
+  _buildRoom() {
+    const c = this.ctx;
+    // Air, decorrelated pink grains per ear.
+    const am = c.createChannelMerger(2);
+    for (const ch of [0, 1]) {
+      const g = this._gain(1);
+      g.connect(am, 0, ch);
+      this._mkBed(this._pink, g, [4, 10]);
+    }
+    this.airBP = this._bq('bandpass', 600, 0.7);
+    this.airPk = this._bq('peaking', 480, 1.4, 0);
+    this.airLP = this._bq('lowpass', 3200, 0.5);
+    this.airAM = this._gain(1);
+    this.airG = this._gain(0);
+    this._chain(am, this.airBP, this.airPk, this.airLP, this.airAM, this.airG, this.amb);
+    const as = this._gain(0.3);
+    this.airG.connect(as); as.connect(this.revIn);
+
+    // Low rumble of the building.
+    const rm = c.createChannelMerger(2);
+    for (const ch of [0, 1]) {
+      const g = this._gain(1);
+      g.connect(rm, 0, ch);
+      this._mkBed(this._brown, g, [6, 12], [0.9, 1.1], 2.2);
     }
     this.roomPeak = this._bq('peaking', 380, 4, 0);
-    this.roomG = this._gain(0.05);
-    this._chain(m, this._bq('lowpass', 280, 0.6), this.roomPeak, this.roomG, this.mix);
+    this.roomG = this._gain(0.04);
+    this._chain(rm, this._bq('lowpass', 320, 0.6), this.roomPeak, this.roomG, this.amb);
 
-    // Far ventilation rumble, breathing very slowly.
-    const v = this._loop(this._pink);
-    const vAM = this._gain(0.75);
-    const vl = this._osc('sine', 0.047), vlg = this._gain(0.25);
+    // Ventilation: a body band and a duct roar band, slowly breathing.
+    const vIn = this._gain(1);
+    this._mkBed(this._pink, vIn, [5, 11]);
+    this.ventLo = this._bq('bandpass', 140, 0.8);
+    this.ventHi = this._bq('bandpass', 300, 1.3);
+    const vSum = this._gain(1), vHiG = this._gain(0.55);
+    vIn.connect(this.ventLo); this.ventLo.connect(vSum);
+    vIn.connect(this.ventHi); this.ventHi.connect(vHiG); vHiG.connect(vSum);
+    const vAM = this._gain(0.8);
+    const vl = this._osc('sine', 0.047), vlg = this._gain(0.18);
     vl.connect(vlg); vlg.connect(vAM.gain); vl.start();
-    this.ventG = this._gain(0.04);
-    this._chain(v, this._bq('bandpass', 85, 0.8), vAM, this.ventG, this.mix);
-    const vs = this._gain(0.5);
+    this.ventG = this._gain(0.02);
+    this._chain(vSum, vAM, this.ventG, this.amb);
+    const vs = this._gain(0.45);
     this.ventG.connect(vs); vs.connect(this.revIn);
-    v.start(0, rnd(0, 3.9));
 
-    // A thin whistle somewhere in the ducts, barely there.
-    const w = this._loop(this._pink);
-    const wAM = this._gain(0.5);
-    const wl = this._osc('sine', 0.031), wlg = this._gain(0.5);
-    wl.connect(wlg); wlg.connect(wAM.gain); wl.start();
-    this.ductG = this._gain(0.006);
-    this._chain(w, this._bq('bandpass', 1380, 28), wAM, this.ductG, this.mix);
-    const ws = this._gain(0.6);
+    // A thin whistle somewhere in the ducts. Mostly absent; _ambTick brings it in now and then.
+    const wIn = this._gain(1);
+    this._mkBed(this._pink, wIn, [5, 10]);
+    this.ductBP = this._bq('bandpass', 1380, 30);
+    this.ductG = this._gain(0);
+    this._chain(wIn, this.ductBP, this.ductG, this.amb);
+    const ws = this._gain(0.7);
     this.ductG.connect(ws); ws.connect(this.revIn);
-    w.start(0, rnd(0, 3.9));
   }
 
   _buildBreath() {
     // Breath noise through the filter cartridge and the mask cavity.
-    const n = this._loop(this._white);
+    const n = this._gain(1);
+    this._mkBed(this._white, n, [5, 10]);
     this.bAir = this._bq('bandpass', 1300, 0.9);
     const mask = this._bq('peaking', 1150, 3, 8);
     const boom = this._bq('peaking', 170, 1, 4);
@@ -640,7 +774,6 @@ export class AudioEngine {
     this.bAM = this._gain(1);
     this.bG = this._gain(0);
     this._chain(n, this.bAir, mask, boom, this.bLP, this.bAM, this.bG, this.mix);
-    n.start(0, rnd(0, 1.9));
     // Shudder for fear.
     const tr = this._osc('sine', 7.5);
     this.bTrem = this._gain(0);
@@ -662,19 +795,22 @@ export class AudioEngine {
   _buildHeart() {
     this.hbOsc = this._osc('sine', 45);
     this.hbG = this._gain(0);
-    this._chain(this.hbOsc, this.hbG, this._bq('lowpass', 150, 0.7), this.mix);
+    // A little second harmonic and a 'thump' band so the beat reads on small speakers too.
+    const sh = this._shaper(2.5);
+    this._chain(this.hbOsc, this.hbG, sh, this._bq('lowpass', 260, 0.7), this.mix);
     this.hbOsc.start();
   }
 
   _buildDrones() {
-    // Fear: low beating saw drone.
-    const fLP = this._bq('lowpass', 150, 1.5);
+    // Fear: low beating saw drone. The lowpass opens with fear so its upper harmonics reach laptop speakers.
+    this.fearLP = this._bq('lowpass', 180, 1.5);
     this.fearG = this._gain(0);
-    for (const [t, f] of [['sawtooth', 41.2], ['sawtooth', 41.75], ['sine', 55]]) {
+    for (const [t, f] of [['sawtooth', 41.2], ['sawtooth', 41.75], ['sine', 55], ['sawtooth', 82.9]]) {
       const o = this._osc(t, f);
-      o.connect(fLP); o.start();
+      if (f > 80) { const g = this._gain(0.35); o.connect(g); g.connect(this.fearLP); } else o.connect(this.fearLP);
+      o.start();
     }
-    this._chain(fLP, this.fearG, this.mix);
+    this._chain(this.fearLP, this.fearG, this.amb);
 
     // Sanity: detuned, wandering cluster.
     const sLP = this._bq('lowpass', 650, 1.2);
@@ -691,16 +827,44 @@ export class AudioEngine {
       o.connect(g); g.connect(sLP); o.start();
     }
     this.sanG = this._gain(0);
-    this._chain(sLP, this.sanG, this.mix);
+    this._chain(sLP, this.sanG, this.amb);
     const ss = this._gain(0.6);
     this.sanG.connect(ss); ss.connect(this.revIn);
+
+    // Undertow: four slow voices that glide between dissonant chords, mostly heard through the reverb.
+    // Always there at a whisper; dark, fear, low sanity and the title screen bring it forward.
+    this.padLP = this._bq('lowpass', 500, 0.8);
+    this.padG = this._gain(0);
+    this._chain(this.padLP, this.padG, this.amb);
+    const ps = this._gain(1.1);
+    this.padG.connect(ps); ps.connect(this.revIn);
+    this._pad = [];
+    const root = 110;
+    const ch0 = CHORDS[0];
+    for (let i = 0; i < 4; i++) {
+      const o = this._osc(this._padWave, root * Math.pow(2, ch0[i] / 12));
+      const g = this._gain(0.2);
+      const lfo = this._osc('sine', rnd(0.03, 0.11)), lg = this._gain(rnd(6, 14));
+      lfo.connect(lg); lg.connect(o.detune); lfo.start();
+      o.connect(g); g.connect(this.padLP); o.start();
+      this._pad.push({ o, g });
+    }
+
+    // Wind tone: resonant noise slowly sweeping, the building exhaling somewhere far away.
+    const wIn = this._gain(1);
+    this._mkBed(this._pink, wIn, [5, 11]);
+    this.windBP = this._bq('bandpass', 420, 5);
+    this.windG = this._gain(0);
+    this._chain(wIn, this.windBP, this.windG, this.amb);
+    const wsend = this._gain(0.8);
+    this.windG.connect(wsend); wsend.connect(this.revIn);
   }
 
   _buildSuit() {
-    const n = this._loop(this._white);
+    const n = this._gain(1);
+    this._mkBed(this._white, n, [5, 10]);
     this.suitG = this._gain(0.004);
     this._chain(n, this._bq('bandpass', 3400, 0.5), this.suitG, this.mix);
-    n.start(0, rnd(0, 1.9));
   }
 
   _buildTinnitus() {
@@ -716,21 +880,30 @@ export class AudioEngine {
 
   _beds(now, st) {
     const alive = st.dead ? 0 : 1;
+    const mk = st.mk || 0, play = 1 - mk;
     const ins = clamp((0.5 - st.sanity) / 0.5);
+    // Slower glides while crossfading to or from the title screen.
+    const slow = mk > 0.001 && mk < 0.999 ? 0.6 : 0;
 
     if (this.humG) {
-      const lvl = 0.11 * st.hum * (1 - st.blackout) * (1 - 0.78 * st.dark) * alive;
-      const tc = st.dead ? 1.2 : st.blackout > 0.05 ? 0.07 : 0.35;
+      // Light-driven, quieter than before, and on the title screen a distant lamp through a wall.
+      const lvl = (0.085 * Math.pow(st.hum, 1.15) * (1 - st.blackout) * (1 - 0.78 * st.dark) * play + 0.05 * mk) * alive;
+      const tc = st.dead ? 1.2 : st.blackout > 0.05 ? 0.07 : 0.35 + slow;
       this._tg(this.humG.gain, lvl, tc);
-      // Power sag as the lights are forced off.
-      const det = -380 * st.blackout;
-      for (const o of this._humOsc) this._tg(o.detune, det, 0.12);
-      this._tg(this.humLP.frequency, 7000 - 3600 * st.dark, 0.4);
+      this._tg(this.humLP.frequency, lerp(7000 - 3600 * st.dark, 1700, mk), 0.4 + slow);
+    }
+    if (this.airG) {
+      const r = st.room;
+      // Small rooms: boxy, closer, brighter air. Big halls: darker, wider, more of it in the reverb.
+      this._tg(this.airBP.frequency, lerp(820, 380, r), 0.8);
+      this._tg(this.airBP.Q, lerp(0.9, 0.5, r), 0.8);
+      this._tg(this.airPk.gain, lerp(5, -2, r), 0.8);
+      this._tg(this.airLP.frequency, lerp(3600, 2000, r) * (1 - 0.35 * st.dark), 0.8);
+      this._tg(this.airG.gain, ((0.026 + 0.012 * r + 0.012 * st.dark) * play + 0.03 * mk) * (st.dead ? 0.4 : 1), 0.8 + slow);
     }
     if (this.roomG) {
-      this._tg(this.roomG.gain, (0.045 + 0.045 * st.dark) * (st.dead ? 0.4 : 1), 0.6);
-      this._tg(this.roomPeak.gain, 11 * st.dark, 0.8);
-      this._tg(this.ventG.gain, 0.04 * (1 - 0.35 * st.dark) * (st.dead ? 0.3 : 1), 0.8);
+      this._tg(this.roomG.gain, (0.035 + 0.04 * st.dark) * (st.dead ? 0.4 : 1), 0.6 + slow);
+      this._tg(this.roomPeak.gain, 9 * st.dark, 0.8);
     }
     if (this.revRet) {
       const r = st.room;
@@ -743,12 +916,23 @@ export class AudioEngine {
       this._tg(this.revLP.frequency, 3800 + 3200 * r, 0.4);
       this._tg(this.erG.gain, 0.06 + 0.34 * (1 - r), 0.4);
     }
-    if (this.suitG) this._tg(this.suitG.gain, (0.004 + 0.009 * st.exertion) * alive, 0.5);
-    if (this.fearG) this._tg(this.fearG.gain, 0.06 * st.fear * st.fear * alive, 0.5);
+    if (this.suitG) this._tg(this.suitG.gain, (0.004 + 0.009 * st.exertion) * alive * play, 0.5 + slow);
+    if (this.fearG) {
+      this._tg(this.fearG.gain, 0.06 * st.fear * st.fear * alive, 0.5);
+      this._tg(this.fearLP.frequency, 180 + 420 * st.fear, 0.5);
+    }
     if (this.sanG) {
       this._tg(this.sanG.gain, 0.05 * ins * alive, 1.2);
       this._tg(this.sanDet.gain, 15 + 70 * ins, 1);
       this._tg(this.sanDet2.gain, 18 + 90 * ins, 1);
+    }
+    if (this.padG) {
+      const lvl = ((0.006 + 0.022 * st.dark + 0.02 * st.fear + 0.022 * ins) * play + 0.03 * mk) * alive;
+      this._tg(this.padG.gain, lvl, 1.5 + slow);
+      this._tg(this.padLP.frequency, (650 + 900 * st.fear + 400 * ins + 250 * mk) * (this._padOpen || 1), 2);
+    }
+    if (this.windG) {
+      this._tg(this.windG.gain, ((0.007 + 0.025 * st.dark + 0.01 * st.room) * play + 0.03 * mk) * (st.dead ? 0.3 : 1), 1.5 + slow);
     }
     if (this.bTrem) this._tg(this.bTrem.gain, 0.45 * st.fear * alive, 0.3);
 
@@ -767,16 +951,173 @@ export class AudioEngine {
     }
   }
 
+  // Slow life in the beds: lamp drift, flutter and dropouts, mains drift, ventilation cycles, duct whistle,
+  // chord changes in the undertow, wind sweeps. Everything here is sparse and randomised, nothing periodic.
+  _ambTick(now, dt, st) {
+    const A = this._am || (this._am = {
+      chr: rnd(8, 20), fl: rnd(3, 10), dr: rnd(20, 50), drift: 0, dT: 0,
+      vent: true, vT: rnd(25, 60), vS: 0, duct: rnd(15, 40), ductOn: 0,
+      pad: 0, wind: 0, air: 0,
+    });
+    const mk = st.mk || 0, alive = st.dead ? 0 : 1;
+    const humLvl = st.hum * (1 - st.blackout) * (1 - st.dark) * alive;
+
+    // Lamps.
+    if (this._fix) {
+      for (const f of this._fix) {
+        if (now < f.next) continue;
+        f.next = now + rnd(1.2, 4.5);
+        // Mostly steady, sometimes one tube sags for a while.
+        const target = Math.random() < 0.15 ? rnd(0.15, 0.45) : rnd(0.55, 1);
+        this._tg(f.lv.gain, target, rnd(0.6, 2.5));
+      }
+      A.dT -= dt;
+      if (A.dT <= 0) {
+        A.dT = rnd(2, 6);
+        A.drift = clamp(A.drift + rnd(-1.5, 1.5), -5, 5); // mains frequency wander, in cents
+      }
+      const det = A.drift - 380 * st.blackout;
+      for (const o of this._humOsc) this._tg(o.detune, det, st.blackout > 0.01 ? 0.12 : 1.5);
+
+      A.chr -= dt;
+      if (A.chr <= 0) {
+        // A new character: the tubes warm up, a different one dominates, the buzz gets thinner or harsher.
+        A.chr = rnd(14, 45);
+        this._fix.forEach((f, i) => {
+          const tc = rnd(2.5, 6);
+          this._tg(f.bp.frequency, i === 2 ? rnd(450, 900) : rnd(700, 2800), tc);
+          this._tg(f.bp.Q, rnd(0.5, 1.4), tc);
+        });
+        this._tg(this.mainsG.gain, rnd(0.13, 0.26), rnd(3, 6));
+        this._tg(this.sizzleG.gain, Math.random() < 0.3 ? rnd(0.1, 0.18) : rnd(0.03, 0.09), rnd(2, 5));
+      }
+
+      A.fl -= dt;
+      if (A.fl <= 0) {
+        A.fl = rnd(6, 20) * (1 + mk);
+        if (humLvl > 0.08 || mk > 0.5) this._flutter(now, mk);
+      }
+      A.dr -= dt;
+      if (A.dr <= 0) {
+        A.dr = rnd(30, 95) * (1 + 1.5 * mk);
+        if (humLvl > 0.2 && mk < 0.5) this._dropout(now);
+      }
+    }
+
+    // Ventilation switching on and off.
+    if (this.ventG) {
+      A.vT -= dt;
+      if (A.vT <= 0) {
+        A.vent = !A.vent;
+        A.vT = A.vent ? rnd(30, 90) : rnd(18, 55);
+        const tc = A.vent ? rnd(1.2, 2.5) : rnd(2.5, 5);
+        this._tg(this.ventHi.frequency, A.vent ? rnd(380, 560) : 220, tc);
+        this._tg(this.ventLo.frequency, A.vent ? rnd(130, 170) : 100, tc);
+        if (alive) {
+          const L = this._L, a = rnd(0, TAU), d = rnd(5, 14);
+          this._shot('_clunk', { pos: [L.x + Math.cos(a) * d, L.y + 1.4, L.z + Math.sin(a) * d], vol: (A.vent ? 0.7 : 0.45) * (1 - 0.5 * mk) }, { ref: 5 });
+        }
+      }
+      A.vS -= dt;
+      if (A.vS <= 0) { A.vS = rnd(3, 8); A.vSurge = rnd(0.75, 1.25); }
+      const vl = (A.vent ? 0.05 : 0.01) * (A.vSurge || 1) * (1 - 0.3 * st.dark) * (st.dead ? 0.3 : 1) * (1 - 0.3 * mk);
+      this._tg(this.ventG.gain, vl, A.vent ? 1.6 : 3);
+    }
+
+    // Duct whistle, now and then.
+    if (this.ductG) {
+      A.duct -= dt;
+      if (A.duct <= 0) {
+        if (A.ductOn) {
+          A.ductOn = 0;
+          A.duct = rnd(20, 60);
+          this._tg(this.ductG.gain, 0, rnd(2, 5));
+        } else if (Math.random() < 0.55) {
+          A.ductOn = 1;
+          A.duct = rnd(6, 18);
+          this._tg(this.ductBP.frequency, rnd(800, 1900), rnd(4, 9));
+          this._tg(this.ductG.gain, rnd(0.004, 0.011) * alive, rnd(2, 5));
+        } else {
+          A.duct = rnd(15, 40);
+        }
+      }
+    }
+
+    // Undertow chords.
+    if (this._pad) {
+      A.pad -= dt;
+      if (A.pad <= 0) {
+        A.pad = rnd(12, 30) * (mk > 0.5 ? 1.3 : 1);
+        const root = pick([110, 116.5, 123.5, 130.8, 138.6, 146.8]);
+        const chord = pick(CHORDS);
+        const glide = rnd(2.5, 8);
+        this._pad.forEach((v, i) => {
+          let f = root * Math.pow(2, chord[i] / 12);
+          while (f < 100) f *= 2; // keep it where small speakers can play it
+          this._tg(v.o.frequency, f, glide * rnd(0.7, 1.3));
+          this._tg(v.g.gain, Math.random() < 0.2 ? 0 : rnd(0.12, 0.3), rnd(3, 7));
+        });
+        this._padOpen = rnd(0.8, 1.35);
+      }
+    }
+    if (this.windBP) {
+      A.wind -= dt;
+      if (A.wind <= 0) {
+        A.wind = rnd(4, 12);
+        this._tg(this.windBP.frequency, rnd(240, 820), rnd(3, 7));
+        this._tg(this.windBP.Q, rnd(3, 9), 4);
+      }
+    }
+    if (this.airAM) {
+      A.air -= dt;
+      if (A.air <= 0) { A.air = rnd(4, 10); this._tg(this.airAM.gain, rnd(0.75, 1.15), rnd(2, 4)); }
+    }
+  }
+
+  // Ballast flutter on one fixture: the irregular stutter of a tube about to fail.
+  _flutter(now, mk) {
+    const f = pick(this._fix);
+    const g = f.am.gain, t0 = now + 0.03, dur = rnd(0.15, mk > 0.5 ? 0.8 : 1.8);
+    g.cancelScheduledValues(t0);
+    let tt = t0;
+    while (tt < t0 + dur) {
+      g.setTargetAtTime(Math.random() < 0.35 ? rnd(0, 0.25) : rnd(0.6, 1.6), tt, 0.006);
+      tt += rnd(0.02, 0.09);
+    }
+    g.setTargetAtTime(1, t0 + dur, 0.06);
+    if (Math.random() < 0.4 && mk < 0.5) {
+      const L = this._L;
+      this._shot('_lamp', { pos: [L.x + rnd(-4, 4), L.y + 1.4, L.z + rnd(-4, 4)], vol: 0.35 }, { s: rnd(0.25, 0.5) });
+    }
+  }
+
+  // All lamps dip at once for a moment (a brownout), then catch again.
+  _dropout(now) {
+    const g = this.humDrop.gain, t0 = now + 0.02;
+    g.cancelScheduledValues(t0);
+    const n = Math.random() < 0.35 ? 2 : 1;
+    let t = t0;
+    for (let i = 0; i < n; i++) {
+      const len = rnd(0.06, 0.4);
+      g.setTargetAtTime(rnd(0.04, 0.3), t, 0.012);
+      g.setTargetAtTime(1, t + len, 0.03);
+      t += len + rnd(0.12, 0.35);
+    }
+    const L = this._L;
+    this._shot('_lamp', { pos: [L.x + rnd(-3, 3), L.y + 1.4, L.z + rnd(-3, 3)], vol: 0.45 }, { s: rnd(0.3, 0.6) });
+  }
+
   _breathTick(now, s) {
     const b = this._br;
     if (!this.bG) return;
-    if (s.dead) {
+    // No breathing while dead or on the title screen; it starts again gently after the crossfade.
+    if (s.dead || (s.mk || 0) > 0.35) {
       if (!b.off) {
         this.bG.gain.cancelScheduledValues(now);
-        this.bG.gain.setTargetAtTime(0, now, 0.1);
+        this.bG.gain.setTargetAtTime(0, now, s.dead ? 0.1 : 0.6);
         b.off = true;
       }
-      b.next = now + 1.5;
+      b.next = now + (s.dead ? 1.5 : 0.8);
       return;
     }
     b.off = false;
@@ -788,8 +1129,8 @@ export class AudioEngine {
     const bpm = (13 + 27 * drive) * rnd(0.88, 1.12);
     const cyc = 60 / bpm;
     const depth = rnd(0.78, 1.15);
-    const pIn = (0.14 + 0.3 * drive) * depth;
-    const pEx = (0.17 + 0.36 * drive) * depth * rnd(0.85, 1.1);
+    const pIn = (0.11 + 0.33 * drive) * depth;
+    const pEx = (0.13 + 0.4 * drive) * depth * rnd(0.85, 1.1);
     const inD = cyc * lerp(0.34, 0.42, drive) * rnd(0.9, 1.1);
     const exD = cyc * lerp(0.42, 0.48, drive) * rnd(0.9, 1.1);
     const te = t + inD + rnd(0.03, 0.08);
@@ -828,7 +1169,7 @@ export class AudioEngine {
   _heartTick(now, s) {
     const hb = this._hb;
     if (!this.hbG) return;
-    const lvl = smoothstep(0.35, 1, s.fear) * (s.dead ? 0 : 1);
+    const lvl = smoothstep(0.35, 1, s.fear) * (s.dead ? 0 : 1) * (1 - (s.mk || 0));
     if (lvl < 0.01) { hb.next = now; return; }
     if (now < hb.next - 0.06) return;
     const t = Math.max(now + 0.02, hb.next);
@@ -846,15 +1187,41 @@ export class AudioEngine {
     hb.next = t + per * rnd(0.97, 1.03);
   }
 
+  // Distant life. Sparse and irregular: an event every 8 to 26 s (sooner as sanity drops), sometimes a
+  // follow-up a few seconds later from nearly the same place, and sometimes the whole ambience 'holds its
+  // breath' for a couple of seconds before it. On the title screen only slow, far, non-human sounds.
   _events(dt, st) {
     if (st.dead) return;
+    const mk = st.mk || 0;
     const ins = clamp((0.5 - st.sanity) / 0.5);
-    this._distT -= dt;
-    if (this._distT <= 0) {
-      this._distT = rnd(20, 90) * (0.35 + 0.65 * st.sanity);
-      this._distant(st);
+    if (this._follow) {
+      this._follow.t -= dt;
+      if (this._follow.t <= 0) {
+        const f = this._follow;
+        this._follow = null;
+        if (mk < 0.5) this._farEvent(f.name, f.pos, f.vol);
+      }
     }
-    if (ins > 0) {
+    this._distT -= dt;
+    if (this._hushPlan && !this._hushOn && this._distT < 2.4 && mk < 0.5 && this.amb) {
+      this._hushOn = true;
+      this._tg(this.amb.gain, 0.45, 0.6);
+    }
+    if (this._distT <= 0) {
+      this._distT = rnd(8, 26) * (0.45 + 0.55 * st.sanity) * (1 + 1.4 * mk);
+      this._distant(st, mk);
+      if (this._hushOn && this.amb) {
+        // Let the room come back slowly after the sound.
+        this._hushOn = false;
+        const g = this.amb.gain, now = this.ctx.currentTime;
+        g.cancelScheduledValues(now);
+        g.setValueAtTime(g.value, now);
+        g.setTargetAtTime(1, now + 1.4, 2.2);
+        this._last.set(g, 1);
+      }
+      this._hushPlan = mk < 0.5 && Math.random() < 0.3;
+    }
+    if (ins > 0 && mk < 0.5) {
       this._sanT -= dt;
       if (this._sanT <= 0) {
         this._sanT = rnd(5, 18) * (1.15 - ins);
@@ -863,15 +1230,30 @@ export class AudioEngine {
     }
   }
 
-  _distant(st) {
-    const L = this._L, a = rnd(0, TAU), d = rnd(22, 55);
+  _farEvent(name, pos, vol) {
+    this._shot(name, { pos, vol }, { ref: 9 });
+  }
+
+  _distant(st, mk) {
+    const L = this._L, a = rnd(0, TAU), d = rnd(16, 42);
     const pos = [L.x + Math.cos(a) * d, L.y + rnd(-1, 2.5), L.z + Math.sin(a) * d];
-    if (Math.random() < 0.12 + 0.3 * (1 - st.sanity)) {
-      this._whisperAt(pos, pick(['murmur', 'murmur', 'call', 'cry', 'laugh']), false, 0.8);
+    if (mk < 0.5 && Math.random() < 0.08 + 0.3 * (1 - st.sanity)) {
+      this._whisperAt(pos, pick(['murmur', 'murmur', 'call', 'cry', 'laugh']), false, 0.8, undefined, 7);
       return;
     }
-    const name = pick(['_thud', '_thud', 'doorSlam', '_drag', '_pipe', '_pipe']);
-    this._shot(name, { pos, vol: rnd(0.5, 0.9) });
+    const name = mk >= 0.5
+      ? wpick([['_farTone', 2], ['_creak', 2], ['_pipe', 1], ['_thud', 0.7], ['_metal', 0.6]])
+      : wpick([['_thud', 2], ['doorSlam', 0.8], ['_drag', 1], ['_pipe', 1.4], ['_creak', 1.6], ['_metal', 1],
+        ['_farTone', 0.5 + 1.5 * (1 - st.sanity) + 0.5 * st.dark], ['_farSteps', 0.6 + 0.6 * st.dark], ['knock', 0.3]]);
+    const vol = rnd(0.6, 1.2) * (mk >= 0.5 ? 0.5 : 1);
+    this._farEvent(name, pos, vol);
+    if (mk < 0.5 && Math.random() < 0.28) {
+      const next = { _thud: '_drag', _drag: '_thud', doorSlam: '_farSteps', _metal: '_metal', _pipe: '_pipe', _creak: '_creak', _farSteps: 'doorSlam', knock: 'knock' }[name];
+      if (next) {
+        const b = a + rnd(-0.25, 0.25), d2 = d + rnd(-4, 4);
+        this._follow = { t: rnd(1.2, 4.5), name: next, pos: [L.x + Math.cos(b) * d2, pos[1], L.z + Math.sin(b) * d2], vol: vol * rnd(0.6, 1) };
+      }
+    }
   }
 
   _sanityEvent(ins) {
@@ -901,6 +1283,7 @@ export class AudioEngine {
       const d = this._dist(x, y, z);
       const lp = this._bq('lowpass', this._lpFor(d), 0.5);
       const p = this._panner(!!o.hrtf);
+      if (o.ref) p.refDistance = o.ref; // distant ambience: audible far away instead of -30 dB
       const sg = this._gain(this._sendFor(o.send || 0, d));
       v.out.connect(lp); lp.connect(p); p.connect(this.mix);
       lp.connect(sg); sg.connect(this.revIn);
@@ -989,6 +1372,7 @@ export class AudioEngine {
       send: SEND[name] !== undefined ? SEND[name] : 0.15,
       ui: name.startsWith('ui'),
       hrtf: !!(extra && extra.hrtf),
+      ref: extra && extra.ref,
     });
     if (!v) return;
     v.out.gain.value = clamp(num(o.vol, 1), 0, 2);
@@ -1031,10 +1415,10 @@ export class AudioEngine {
     } catch (e) { this._err(e); }
   }
 
-  _whisperAt(pos, kind, prio, vol, send) {
+  _whisperAt(pos, kind, prio, vol, send, ref) {
     const d = this._dist(pos[0], pos[1], pos[2]);
     const sendAmt = send !== undefined ? send : d < 2.5 ? 0.25 : 1.1;
-    const v = this._voice({ prio, pos, send: sendAmt, hrtf: true });
+    const v = this._voice({ prio, pos, send: sendAmt, hrtf: true, ref });
     if (!v) return;
     v.out.gain.value = vol;
     let dur = 3;
@@ -1700,17 +2084,26 @@ const SFX = {
     return 5.6;
   },
 
+  // UI: a worn terminal. Soft tick on hover, a relay click with a tiny ballast zap on select.
   uiHover(v, t) {
-    this._burst(v, t, 'bandpass', 3200, 5, 0.1, 0.0005, 0.012);
-    return 0.05;
+    this._burst(v, t, 'bandpass', rnd(2900, 3400), 5, 0.1, 0.0005, 0.012);
+    this._tone(v, t, 'sine', 1760, 0, 0, 0.012, 0.001, 0.03);
+    return 0.06;
   },
   uiClick(v, t) {
     this._burst(v, t, 'bandpass', 2400, 4, 0.3, 0.0005, 0.02);
+    this._burst(v, t + 0.011, 'bandpass', 3600, 5, 0.14, 0.0005, 0.012); // relay bounce
     this._tone(v, t, 'sine', 220, 140, 0.04, 0.22, 0.001, 0.05);
-    return 0.1;
+    const b = this._osc(this._buzzWave, 120), bp = this._bq('bandpass', 1400, 0.8), g = this._gain(0);
+    this._ad(g.gain, t + 0.01, 0.004, 0.035, 0.07);
+    this._chain(b, bp, g, v.out);
+    v.nodes.push(bp, g);
+    this._run(v, b, t, t + 0.12);
+    return 0.15;
   },
   uiBack(v, t) {
     this._burst(v, t, 'bandpass', 1800, 4, 0.22, 0.0005, 0.02);
+    this._burst(v, t + 0.014, 'bandpass', 2600, 5, 0.1, 0.0005, 0.012);
     this._tone(v, t, 'sine', 330, 160, 0.08, 0.2, 0.002, 0.09);
     return 0.15;
   },
@@ -1757,6 +2150,7 @@ const SFX = {
     for (let k = 0; k < 3; k++) {
       this._tone(v, tk, 'sine', 150, 110, 0.03, 0.6, 0.001, 0.12);
       this._burst(v, tk, 'bandpass', 320, 2.5, 0.7, 0.001, 0.06);
+      this._burst(v, tk, 'bandpass', rnd(550, 700), 2, 2.6, 0.001, 0.05, null, this._pink);
       this._burst(v, tk, 'bandpass', 1800, 2, 0.2, 0.0005, 0.014);
       tk += rnd(0.26, 0.34) + (k === 1 ? rnd(0, 0.08) : 0);
     }
@@ -1767,8 +2161,10 @@ const SFX = {
     this._tone(v, t, 'sine', 65, 40, 0.2, 1, 0.002, 0.6);
     this._tone(v, t + 0.03, 'sine', 120, 90, 0.05, 0.4, 0.002, 0.15);
     this._burst(v, t, 'lowpass', 900, 0.7, 0.9, 0.002, 0.35);
+    this._burst(v, t, 'bandpass', rnd(260, 360), 1.2, 5, 0.002, 0.3, null, this._pink); // the door panel
+    this._burst(v, t, 'bandpass', 3200, 8, 0.35, 0.0005, 0.012); // latch
     const k = 3 + ((Math.random() * 3) | 0);
-    for (let i = 0; i < k; i++) this._burst(v, t + rnd(0.05, 0.25), 'bandpass', 2600, 6, 0.15, 0.0005, 0.015);
+    for (let i = 0; i < k; i++) this._burst(v, t + rnd(0.05, 0.25), 'bandpass', rnd(2200, 3000), 6, 0.28, 0.0005, 0.015);
     return 1.5;
   },
 
@@ -1800,6 +2196,63 @@ const SFX = {
     return dur + 0.2;
   },
 
+  // Handheld analog radar. Non-positional, inside the hood like the flashlight.
+  // Sweep: one soft, slightly varied tick and motor whirr per revolution. Kept very low and dull on purpose.
+  radarSweep(v, t) {
+    this._burst(v, t, 'bandpass', rnd(1500, 1900), 3, 0.035, 0.001, 0.02, null, this._pink);
+    const w = this._burst(v, t, 'bandpass', rnd(260, 340), 2, 0.05, 0.06, 0.22, null, this._pink);
+    w.fl.frequency.setValueAtTime(rnd(240, 300), t);
+    w.fl.frequency.linearRampToValueAtTime(rnd(320, 380), t + 0.25);
+    return 0.4;
+  },
+
+  // Friend located: a round, slightly detuned ping, a touch higher for closer contacts (opts.pitch 0..1).
+  radarBlip(v, t, o) {
+    const pitch = clamp(num(o && o.pitch, 0));
+    const f = 880 * (1 + 0.15 * pitch) * rnd(0.995, 1.005);
+    this._tone(v, t, 'sine', f, f * 0.985, 0.3, 0.07, 0.004, 0.38);
+    this._tone(v, t, 'sine', f * 1.0045, f * 0.99, 0.3, 0.05, 0.004, 0.32);
+    this._tone(v, t, 'sine', f * 2.001, 0, 0, 0.012, 0.003, 0.15);
+    return 0.5;
+  },
+
+  // An echo that is not a person: the same ping, unstable and crackly, quieter.
+  radarGhost(v, t) {
+    const f = rnd(620, 980);
+    const o = this._tone(v, t, 'sine', f, 0, 0, 0.04, 0.01, 0.45);
+    let tt = t;
+    while (tt < t + 0.45) {
+      o.frequency.setTargetAtTime(f * rnd(0.9, 1.08), tt, 0.015);
+      tt += rnd(0.02, 0.06);
+    }
+    this._tone(v, t + 0.02, 'sine', f * rnd(1.01, 1.03), 0, 0, 0.02, 0.01, 0.3);
+    const n = this._loop(this._white), bp = this._bq('bandpass', 2600, 1.2), gate = this._gain(0);
+    this._chain(n, bp, gate, v.out);
+    v.nodes.push(bp, gate);
+    tt = t;
+    while (tt < t + 0.35) {
+      gate.gain.setValueAtTime(Math.random() < 0.5 ? 0 : rnd(0.005, 0.02), tt);
+      tt += rnd(0.006, 0.02);
+    }
+    gate.gain.setValueAtTime(0, tt);
+    this._run(v, n, t, tt + 0.02, rnd(0, 5));
+    return 0.6;
+  },
+
+  // Power switch with a CRT charge-up whine.
+  radarOn(v, t) {
+    flashClick(this, v, t, 1.05);
+    this._tone(v, t + 0.03, 'sine', 180, 2600, 0.35, 0.02, 0.05, 0.35);
+    this._burst(v, t + 0.03, 'bandpass', 3000, 1, 0.012, 0.25, 0.2);
+    return 0.7;
+  },
+  // Switch off, charge bleeding away.
+  radarOff(v, t) {
+    flashClick(this, v, t, 0.92);
+    this._tone(v, t + 0.02, 'sine', 2400, 140, 0.3, 0.02, 0.003, 0.35);
+    return 0.5;
+  },
+
   // Footsteps heard from inside the suit.
   _foot(v, t, o, x) {
     const kind = x.kind, g = (0.15 + 0.85 * x.loud) * rnd(0.85, 1.15), p = rnd(0.92, 1.08);
@@ -1807,10 +2260,26 @@ const SFX = {
     boom.connect(v.out); v.nodes.push(boom);
     const rustle = (amp, a, d) => this._burst(v, t + rnd(-0.01, 0.03), 'bandpass', rnd(2600, 3600), 0.6, amp, a, d, boom);
     if (kind === 'carpet') {
-      this._tone(v, t, 'sine', 90 * p, 55 * p, 0.05, 0.55 * g, 0.002, 0.09, boom);
-      this._burst(v, t, 'lowpass', 500 * p, 0.7, 0.5 * g, 0.003, 0.08, boom);
-      this._burst(v, t + rnd(0.05, 0.08), 'lowpass', 800 * p, 0.7, 0.3 * g, 0.003, 0.06, boom);
-      this._burst(v, t + 0.02, 'bandpass', 1100 * p, 2, 0.06 * g, 0.01, 0.06, boom); // damp squish
+      // Heel: thump plus the boot sole body (the part small speakers can actually play).
+      this._tone(v, t, 'sine', 90 * p, 55 * p, 0.05, 0.32 * g, 0.002, 0.09, boom);
+      this._burst(v, t, 'lowpass', 500 * p, 0.7, 0.45 * g, 0.003, 0.08, boom);
+      this._burst(v, t, 'bandpass', rnd(230, 320) * p, 1.2, 2.6 * g, 0.003, 0.08, boom, this._pink);
+      // Toe roll a little later.
+      const tt = t + rnd(0.05, 0.09);
+      this._burst(v, tt, 'lowpass', 800 * p, 0.7, 0.28 * g, 0.003, 0.06, boom);
+      this._burst(v, tt, 'bandpass', rnd(380, 520) * p, 1.4, 1.3 * g, 0.003, 0.05, boom, this._pink);
+      // Damp carpet: a short crackly squish, different every step.
+      const sq = this._loop(this._white), sbp = this._bq('bandpass', rnd(650, 1150) * p, 1.6), sgt = this._gain(0);
+      this._chain(sq, sbp, sgt, boom);
+      v.nodes.push(sbp, sgt);
+      const sd = rnd(0.06, 0.12);
+      let ts = t + 0.015;
+      while (ts < t + 0.015 + sd) {
+        sgt.gain.setValueAtTime(Math.random() < 0.4 ? 0 : rnd(0.05, 0.14) * g, ts);
+        ts += rnd(0.004, 0.012);
+      }
+      sgt.gain.setValueAtTime(0, ts);
+      this._run(v, sq, t, ts + 0.02, rnd(0, 5));
       if (Math.random() < 0.7) rustle(0.07 * g, 0.03, 0.18);
       return 0.35;
     }
@@ -1827,7 +2296,8 @@ const SFX = {
       return 0.45;
     }
     // land
-    this._tone(v, t, 'sine', 75 * p, 35 * p, 0.12, 1.0 * g, 0.002, 0.25, boom);
+    this._tone(v, t, 'sine', 75 * p, 35 * p, 0.12, 0.8 * g, 0.002, 0.25, boom);
+    this._burst(v, t, 'bandpass', rnd(180, 260) * p, 1, 4 * g, 0.003, 0.2, boom, this._pink);
     this._burst(v, t, 'lowpass', 600 * p, 0.7, 0.9 * g, 0.002, 0.18, boom);
     rustle(0.2 * g, 0.02, 0.35);
     this._burst(v, t + 0.05, 'bandpass', 520, 9, 0.05 * g, 0.02, 0.15, boom); // suit creak
@@ -1853,26 +2323,37 @@ const SFX = {
     return dur + 0.1;
   },
 
-  // Distant ambience.
+  // Distant ambience. These are placed 16 to 42 m away with a large panner refDistance, so the panner's
+  // distance lowpass and the reverb do the 'far' work; each recipe keeps some body in the 150 Hz to 2 kHz
+  // range so it still reads on laptop and phone speakers.
   _thud(v, t) {
-    this._tone(v, t, 'sine', 55, 35, 0.3, 1, 0.003, 0.7);
-    this._burst(v, t, 'lowpass', 400, 0.7, 0.8, 0.003, 0.5);
-    return 1.2;
+    this._tone(v, t, 'sine', 58, 34, 0.3, 0.5, 0.003, 0.8);
+    this._tone(v, t, 'triangle', rnd(130, 170), 80, 0.15, 0.6, 0.002, 0.35);
+    this._burst(v, t, 'lowpass', 420, 0.7, 0.6, 0.003, 0.5);
+    this._burst(v, t, 'bandpass', rnd(220, 320), 1.2, 5, 0.003, 0.45, null, this._pink); // the wall it hit
+    this._burst(v, t, 'bandpass', rnd(700, 1100), 1.5, 2.2, 0.001, 0.08, null, this._pink); // the knock of it
+    if (Math.random() < 0.5) this._burst(v, t + rnd(0.08, 0.2), 'bandpass', rnd(1800, 2600), 4, 0.05, 0.002, 0.3); // something rattles
+    return 1.4;
   },
 
   _drag(v, t) {
     const dur = rnd(1.2, 2.8);
     const n = this._loop(this._brown), lp = this._bq('lowpass', 700, 0.8), g = this._gain(0);
+    const gr = this._loop(this._white), grBP = this._bq('bandpass', rnd(900, 1600), 1.2), grG = this._gain(0);
     this._chain(n, lp, g, v.out);
-    v.nodes.push(lp, g);
+    this._chain(gr, grBP, grG, v.out);
+    v.nodes.push(lp, g, grBP, grG);
     let tt = t;
     while (tt < t + dur) {
-      const p = (tt - t) / dur;
-      g.gain.setValueAtTime(Math.sin(Math.PI * p) * rnd(0.3, 1.4), tt);
+      const p = (tt - t) / dur, k = Math.sin(Math.PI * p) * rnd(0.3, 1.4);
+      g.gain.setValueAtTime(k, tt);
+      grG.gain.setValueAtTime(k * k * rnd(0.02, 0.09), tt);
       tt += rnd(0.01, 0.04);
     }
     g.gain.setValueAtTime(0, t + dur);
+    grG.gain.setValueAtTime(0, t + dur);
     this._run(v, n, t, t + dur + 0.05, rnd(0, 3));
+    this._run(v, gr, t, t + dur + 0.05, rnd(0, 3));
     return dur + 0.2;
   },
 
@@ -1880,12 +2361,105 @@ const SFX = {
     const f = rnd(180, 320), k = 2 + ((Math.random() * 2) | 0);
     let tk = t;
     for (let i = 0; i < k; i++) {
-      [[1, 0.6, 0.5], [2.76, 0.4, 0.3], [5.4, 0.25, 0.2], [8.9, 0.15, 0.12]].forEach(([r, d, a]) =>
-        this._tone(v, tk, 'sine', f * r, 0, 0, a, 0.001, d));
-      this._burst(v, tk, 'bandpass', 2500, 1, 0.2, 0.0005, 0.01);
+      const a = i === 0 ? 1 : rnd(0.5, 0.9);
+      [[1, 0.9, 0.5], [2.76, 0.6, 0.3], [5.4, 0.35, 0.2], [8.9, 0.2, 0.12]].forEach(([r, d, amp]) =>
+        this._tone(v, tk, 'sine', f * r * rnd(0.998, 1.002), 0, 0, amp * a, 0.001, d));
+      this._burst(v, tk, 'bandpass', 2500, 1, 0.2 * a, 0.0005, 0.01);
       tk += rnd(0.18, 0.4);
     }
-    return tk - t + 0.8;
+    return tk - t + 1;
+  },
+
+  // The building settling: stick-slip creak through a resonant beam.
+  _creak(v, t) {
+    const dur = rnd(0.7, 2.2), f = rnd(260, 560);
+    const o = this._osc('sawtooth', rnd(14, 24));
+    o.frequency.setValueAtTime(rnd(12, 22), t);
+    o.frequency.linearRampToValueAtTime(rnd(28, 60), t + dur * rnd(0.3, 0.6));
+    o.frequency.linearRampToValueAtTime(rnd(9, 20), t + dur);
+    const env = this._gain(0);
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(2.2, t + 0.12);
+    env.gain.setValueAtTime(2.2, t + dur - 0.2);
+    env.gain.linearRampToValueAtTime(0, t + dur);
+    const b1 = this._bq('bandpass', f, 9), b2 = this._bq('bandpass', f * 2.37, 7), b2g = this._gain(0.5);
+    b1.frequency.setValueAtTime(f, t);
+    b1.frequency.linearRampToValueAtTime(f * rnd(0.85, 1.15), t + dur);
+    o.connect(env);
+    env.connect(b1); b1.connect(v.out);
+    env.connect(b2); b2.connect(b2g); b2g.connect(v.out);
+    v.nodes.push(env, b1, b2, b2g);
+    this._run(v, o, t, t + dur + 0.05);
+    return dur + 0.5;
+  },
+
+  // Metal somewhere: a struck panel or a dropped bar, inharmonic and long.
+  _metal(v, t) {
+    const f = rnd(170, 420), hits = Math.random() < 0.5 ? 1 : 2 + ((Math.random() * 3) | 0);
+    let tk = t;
+    for (let h = 0; h < hits; h++) {
+      const a = h === 0 ? 1 : rnd(0.25, 0.6);
+      [[1, 1.8, 0.22], [2.41, 1.3, 0.16], [3.87, 0.9, 0.12], [5.33, 0.6, 0.08], [6.9, 0.4, 0.05]].forEach(([r, d, amp]) =>
+        this._tone(v, tk, 'sine', f * r * rnd(0.995, 1.005), 0, 0, amp * a, 0.001, d * rnd(0.8, 1.2)));
+      this._burst(v, tk, 'bandpass', rnd(1500, 3000), 1.2, 0.3 * a, 0.0005, 0.02);
+      tk += h === 0 ? rnd(0.15, 0.35) : rnd(0.06, 0.16);
+    }
+    return tk - t + 2.2;
+  },
+
+  // A very far, voice-like tone: almost singing, almost a moan. Formants on a glottal source.
+  _farTone(v, t) {
+    const dur = rnd(2.5, 5), f0 = rnd(140, 250);
+    const o = this._osc(this._glotWave, f0);
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.linearRampToValueAtTime(f0 * rnd(0.86, 1.1), t + dur * 0.7);
+    o.frequency.linearRampToValueAtTime(f0 * rnd(0.75, 0.95), t + dur);
+    const lfo = this._osc('sine', rnd(4.5, 5.8)), lg = this._gain(rnd(10, 22));
+    lfo.connect(lg); lg.connect(o.detune);
+    const env = this._gain(0);
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(1.1, t + dur * rnd(0.3, 0.5));
+    env.gain.linearRampToValueAtTime(0.9, t + dur * 0.75);
+    env.gain.linearRampToValueAtTime(0, t + dur);
+    o.connect(env);
+    const sum = this._gain(1);
+    sum.connect(v.out);
+    v.nodes.push(lg, env, sum);
+    for (const [fr, q, g] of [[rnd(480, 760), 5, 1], [rnd(850, 1300), 7, 0.5], [rnd(2400, 2800), 8, 0.12]]) {
+      const bp = this._bq('bandpass', fr, q), gg = this._gain(g);
+      env.connect(bp); bp.connect(gg); gg.connect(sum);
+      v.nodes.push(bp, gg);
+    }
+    this._burst(v, t + dur * 0.2, 'bandpass', 1300, 1, 0.03, dur * 0.3, dur * 0.5, sum); // breath on it
+    this._run(v, o, t, t + dur + 0.05);
+    this._run(v, lfo, t, t + dur + 0.05);
+    return dur + 0.4;
+  },
+
+  // Someone walking, slowly, far away. Then they stop.
+  _farSteps(v, t) {
+    const n = 3 + ((Math.random() * 5) | 0), per = rnd(0.55, 0.75);
+    let tk = t;
+    for (let i = 0; i < n; i++) {
+      const a = rnd(0.7, 1) * (i === n - 1 ? 0.6 : 1);
+      this._tone(v, tk, 'sine', 110, 60, 0.05, 0.5 * a, 0.002, 0.12);
+      this._burst(v, tk, 'lowpass', 520, 0.7, 0.45 * a, 0.003, 0.09);
+      this._burst(v, tk, 'bandpass', rnd(260, 340), 1.5, 4 * a, 0.003, 0.1, null, this._pink);
+      this._burst(v, tk + 0.03, 'bandpass', rnd(900, 1400), 1.5, 0.9 * a, 0.004, 0.06, null, this._pink);
+      tk += per * rnd(0.92, 1.08);
+    }
+    return tk - t + 0.5;
+  },
+
+  // Ventilation damper or relay switching somewhere in the ceiling.
+  _clunk(v, t) {
+    this._tone(v, t, 'sine', 95, 60, 0.08, 0.6, 0.002, 0.2);
+    this._burst(v, t, 'bandpass', 700, 1.5, 2, 0.001, 0.07, null, this._pink);
+    this._burst(v, t, 'bandpass', 340, 1.5, 2.4, 0.002, 0.12, null, this._pink);
+    this._tone(v, t + 0.01, 'sine', rnd(1300, 1700), 0, 0, 0.05, 0.001, 0.25);
+    const k = 2 + ((Math.random() * 3) | 0);
+    for (let i = 0; i < k; i++) this._burst(v, t + rnd(0.04, 0.22), 'bandpass', rnd(1800, 3200), 5, 0.08, 0.0005, 0.02);
+    return 0.8;
   },
 };
 

@@ -1,0 +1,110 @@
+[
+ {
+  "file": "armchair.glb",
+  "tris": "2488 -> 2488",
+  "size": "1.299 x 1.33 x 1.276",
+  "mount": "floor",
+  "tex": "1024x1024 (5 rects packed 648x931, x1.1 of source texels)",
+  "kb": "113.5",
+  "yawDeg": 134.4
+ },
+ {
+  "file": "bookshelf.glb",
+  "tris": "808 -> 808",
+  "size": "0.923 x 1.229 x 0.43",
+  "mount": "floor",
+  "tex": "512x512 (12 rects packed 452x617, x0.83 of source texels)",
+  "kb": "34.3",
+  "yawDeg": 180
+ },
+ {
+  "file": "exit-door.glb",
+  "tris": "10602 -> 5999",
+  "size": "2.105 x 2.277 x 0.286",
+  "mount": "wall",
+  "tex": "1024x1024 (10 rects packed 748x866, x1.18 of source texels)",
+  "kb": "190.3",
+  "yawDeg": 180
+ },
+ {
+  "file": "exit-sign.glb",
+  "tris": "176 -> 176",
+  "size": "0.22 x 0.156 x 0.051",
+  "mount": "wall",
+  "tex": "512x512 (2 rects packed 692x1024, x0.5 of source texels), 256x256 (1 rects packed 257x275, x0.93 of source texels)",
+  "kb": "12.0",
+  "yawDeg": 180
+ },
+ {
+  "file": "ceiling-lamp.glb",
+  "tris": "2336 -> 966",
+  "size": "0.419 x 0.217 x 0.419",
+  "mount": "ceiling",
+  "tex": "512x512 (1 rects packed 773x910, x0.56 of source texels), 512x512 (1 rects packed 369x328, x1.39 of source texels)",
+  "kb": "40.7",
+  "yawDeg": 163
+ },
+ {
+  "file": "troffer.glb",
+  "tris": "36 -> 36",
+  "size": "0.728 x 0.031 x 0.739",
+  "mount": "ceiling",
+  "tex": "128x256 (2 rects packed 140x175, x0.91 of source texels), 128x128 (1 rects packed 92x81, x1.39 of source texels)",
+  "kb": "5.7",
+  "yawDeg": 180
+ },
+ {
+  "file": "vent.glb",
+  "tris": "218 -> 218",
+  "size": "0.727 x 0.076 x 0.727",
+  "mount": "ceiling",
+  "tex": "256x256 (8 rects packed 329x418, x0.61 of source texels)",
+  "kb": "12.0",
+  "yawDeg": 180
+ },
+ {
+  "file": "smoke-detector.glb",
+  "tris": "614 -> 299",
+  "size": "0.125 x 0.047 x 0.127",
+  "mount": "ceiling",
+  "tex": "256x256 (12 rects packed 394x492, x0.52 of source texels)",
+  "kb": "15.1",
+  "yawDeg": 160
+ },
+ {
+  "file": "socket.glb",
+  "tris": "992 -> 256",
+  "size": "0.078 x 0.126 x 0.006",
+  "mount": "wall",
+  "tex": "256x256 (4 rects packed 390x449, x0.57 of source texels)",
+  "kb": "12.9",
+  "yawDeg": 90
+ },
+ {
+  "file": "window.glb",
+  "tris": "1668 -> 1668",
+  "size": "2.419 x 0.745 x 0.288",
+  "mount": "wall",
+  "tex": "1024x1024 (5 rects packed 1082x1084, x0.94 of source texels)",
+  "kb": "120.0",
+  "yawDeg": 90
+ },
+ {
+  "file": "hazmat-suit.glb",
+  "tris": "176044 -> 14999 (torso 2420+1436, head 2476+344, armL 1726+422, armR 2293+414, legL 2981+37, legR 3103+31)",
+  "size": "0.747 x 1.9 x 0.463",
+  "mount": "floor",
+  "tex": "1024x1024 (packed 1146x1022, x0.89)",
+  "kb": "597.8",
+  "yawDeg": 180
+ },
+ {
+  "file": "operator-suit.glb",
+  "tris": "32256 -> 15000 (torso 4738+1387, head 1611+277, armL 1804+469, armR 1795+472, legL 2532+116, legR 2520+113)",
+  "size": "0.807 x 1.9 x 0.426",
+  "mount": "floor",
+  "tex": "1024x1024 (packed 1147x1024, x0.89)",
+  "kb": "517.0",
+  "yawDeg": 180
+ }
+]

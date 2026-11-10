@@ -52,6 +52,10 @@ const P = {
   resume: 'M8 5.5l10 6.5-10 6.5z',
   dot: 'M12 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z',
   keys: 'M3.5 7.5h17v10h-17zM7 11h.01M10 11h.01M13 11h.01M16 11h.01M8 14.5h8',
+  radar: 'M12 3.5a8.5 8.5 0 1 0 8.5 8.5M12 7.5a4.5 4.5 0 1 0 4.5 4.5M12 12l6-6M16.6 15.2h.01',
+  map: 'M3.5 6.6l5.5-2.1 6 2.1 5.5-2.1v12.9l-5.5 2.1-6-2.1-5.5 2.1zM9 4.5v12.9M15 6.6v12.9',
+  // a slice, crust up, in the same 1.5 stroke as everything else
+  pizza: 'M3.6 7.4C8.9 4.3 15.1 4.3 20.4 7.4L12 20.6 3.6 7.4zM5.3 10.1c4.4-2.3 9-2.3 13.4 0M9.4 12.3a1.1 1.1 0 1 0 2.2 0 1.1 1.1 0 1 0-2.2 0zM13.3 14.6a.9.9 0 1 0 1.8 0 .9.9 0 1 0-1.8 0z',
 };
 const icon = (name, cls = '', style = '') =>
   `<svg class="ico ${cls}" viewBox="0 0 24 24" aria-hidden="true" focusable="false"${style ? ` style="${style}"` : ''}><path d="${P[name] || P.dot}"/></svg>`;
@@ -135,7 +139,7 @@ const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), [tabi
 export function createUI(opts = {}) {
   const o = {
     version: '0.0.0', edition: 'websim', repoUrl: '#', donateUrl: '#',
-    artifacts: [], signs: [], ...opts,
+    artifacts: [], signs: [], credits: [], ...opts,
   };
   const lou15 = o.edition === 'lou15';
   const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -177,18 +181,20 @@ export function createUI(opts = {}) {
   root.dataset.edition = lou15 ? 'lou15' : 'websim';
   if (reduced) root.classList.add('reduced');
 
-  const menuItem = (act, label, idx, extra = '', ic = '') =>
-    `<button type="button" class="mi" data-act="${act}" ${extra}><span class="idx">${idx}</span>${ic ? icon(ic, 'mi-ico') : ''}<span class="mi-l">${label}</span></button>`;
-  const panelBtn = (panel, label, idx, ic) => menuItem('panel', label, idx, `data-panel="${panel}"`, ic);
+  // menu rows are unlit tubes; they strike on hover or keyboard focus (CSS)
+  const menuItem = (act, label, extra = '', ic = '') =>
+    `<button type="button" class="mi tube" data-act="${act}" ${extra}>${ic ? icon(ic, 'mi-ico') : ''}<span class="mi-l">${label}</span></button>`;
+  const panelBtn = (panel, label, ic) => menuItem('panel', label, `data-panel="${panel}"`, ic);
   const extLink = (href, cls, inner, label) =>
     `<a class="${cls}" href="${esc(href)}" target="_blank" rel="noopener" data-act="link"${label ? ` aria-label="${esc(label)}"` : ''}>${inner}</a>`;
-
-  const zeroSvg = `<svg class="wm-zero" viewBox="0 0 62 100" aria-hidden="true" focusable="false">
-      <rect class="z-glow" x="7" y="7" width="48" height="86" rx="9"/>
-      <rect class="z-fill" x="7" y="7" width="48" height="86" rx="9"/>
-      <path class="z-grid" d="M31 14v72M14 36h34M14 64h34"/>
-      <rect class="z-tube" x="7" y="7" width="48" height="86" rx="9"/>
-    </svg>`;
+  // backlit sign box: the EXIT-sign primary action
+  const signBtn = (act, label, extra = '', cls = '') =>
+    `<button type="button" class="btn-sign ${cls}" data-act="${act}" ${extra}><span class="bs-l">${label}</span>${icon('arrow', 'bs-ico')}</button>`;
+  // one span per letter, so single tubes can misbehave
+  const tubeWord = (text, odd = {}) => [...text].map((c, i) =>
+    c === ' ' ? '<span class="tl-sp"> </span>' : `<span class="tl${odd[i] ? ' ' + odd[i] : ''}" style="--k:${i}">${esc(c)}</span>`).join('');
+  // screw heads for the laminate header plates
+  const screws = '<i class="screw screw-l" aria-hidden="true"></i><i class="screw screw-r" aria-hidden="true"></i>';
 
   const compassTicks = (() => {
     const out = [];
@@ -229,11 +235,10 @@ export function createUI(opts = {}) {
   <div class="hud" data-r="hud" aria-hidden="true">
     <div class="hud-safe">
       <div class="hud-tl hb">
-        <div class="hud-k"><span>LEVEL 0</span><i class="hud-rule"></i><span>SECTOR</span></div>
         <div class="hud-sector" data-r="sector">--</div>
         <div class="hud-name" data-r="sectorName"></div>
         <div class="hud-disc" data-r="disc">Unrecorded</div>
-        <div class="hud-depth"><span>DEPTH</span><b data-r="depth">0000</b><span>M</span></div>
+        <div class="hud-depth"><span>Depth</span><b data-r="depth">0000</b><span>m</span></div>
       </div>
 
       <div class="hud-tc">
@@ -245,29 +250,30 @@ export function createUI(opts = {}) {
       </div>
 
       <div class="hud-tr hb">
-        <div class="hud-row"><i class="pip"></i><b data-r="players">0</b><span>ONLINE</span></div>
+        <div class="hud-row"><i class="pip"></i><b data-r="players">0</b><span>online</span></div>
         <div class="hud-row hud-mic" data-r="mic">${icon('micOff', 'mic-off')}${icon('mic', 'mic-on')}<span data-r="micT">MIC OFF</span></div>
-        <div class="hud-row hud-fps" data-r="fpsRow"><b data-r="fps">--</b><span>FPS</span></div>
+        <div class="hud-row hud-keyhint"><span class="hk">M</span><span>Map</span><span class="hk">R</span><span>Radar</span></div>
+        <div class="hud-row hud-fps" data-r="fpsRow"><b data-r="fps">--</b><span>fps</span></div>
       </div>
 
       <div class="hud-bl hb">
-        ${vitalRow('health', 'INTEGRITY')}
-        ${vitalRow('sanity', 'COGNITION')}
-        ${vitalRow('stamina', 'AIR')}
-        ${vitalRow('battery', 'CELL')}
+        ${vitalRow('health', 'Integrity')}
+        ${vitalRow('sanity', 'Cognition')}
+        ${vitalRow('stamina', 'Air')}
+        ${vitalRow('battery', 'Cell')}
         <div class="hud-states">
-          <span class="hs" data-r="lamp">${icon('flashlight')}<span>LAMP</span></span>
-          <span class="hs" data-r="stance">${icon('crouch')}<span>LOW</span></span>
+          <span class="hs" data-r="lamp">${icon('flashlight')}<span>Lamp</span></span>
+          <span class="hs" data-r="stance">${icon('crouch')}<span>Low</span></span>
         </div>
       </div>
 
       <div class="hud-br hb" data-r="det">
-        <div class="det-k"><span>ANOMALY</span><i class="det-blink"></i></div>
+        <div class="det-k"><span>Anomaly</span><i class="det-blink"></i></div>
         <div class="det-m"><i class="det-track"></i><i class="det-fill" data-r="detFill"></i></div>
       </div>
 
       <div class="toasts" data-r="toasts"></div>
-      <div class="prompt" data-r="prompt"><span class="kc" data-r="promptKey">E</span><span data-r="promptText"></span></div>
+      <div class="prompt" data-r="prompt"><span class="kc" data-r="promptKey">E</span><span class="prompt-t" data-r="promptText"></span></div>
     </div>
     <div class="reticle"></div>
     <div class="disc-stage" data-r="discStage"></div>
@@ -280,6 +286,8 @@ export function createUI(opts = {}) {
     <div class="stick" data-r="stick"><i class="stick-ring"></i><i class="stick-knob" data-r="knob"></i></div>
     <button type="button" class="tb tb-pause" data-touch="pause" aria-label="Pause">${icon('pause')}</button>
     <button type="button" class="tb tb-roster" data-touch="roster" aria-label="Players">${icon('people')}</button>
+    <button type="button" class="tb tb-map" data-touch="map" aria-label="Map">${icon('map')}</button>
+    <button type="button" class="tb tb-radar" data-touch="radar" aria-label="Radar">${icon('radar')}</button>
     <button type="button" class="tb tb-voice" data-touch="voice" aria-label="Talk">${icon('mic')}</button>
     <div class="tb-cluster">
       <button type="button" class="tb tb-light" data-touch="flashlight" aria-label="Flashlight">${icon('flashlight')}</button>
@@ -290,14 +298,13 @@ export function createUI(opts = {}) {
   </div>
 
   <div class="roster layer" data-r="roster" aria-hidden="true">
-    <div class="roster-card">
+    <div class="roster-card plate">
+      ${screws}
       <div class="roster-col">
-        <p class="kicker">In the building</p>
         <p class="roster-h"><b data-r="rOnline">0</b> online</p>
         <ol class="rlist" data-r="rPlayers"></ol>
       </div>
       <div class="roster-col">
-        <p class="kicker">Records</p>
         <p class="roster-h">Most sectors</p>
         <ol class="rlist" data-r="rBoard"></ol>
       </div>
@@ -310,12 +317,12 @@ export function createUI(opts = {}) {
       <svg class="wheel-svg" viewBox="-100 -100 200 200" aria-hidden="true" focusable="false">
         <defs><filter id="l0-chalk"><feTurbulence type="fractalNoise" baseFrequency="1.6" numOctaves="1" seed="4"/><feDisplacementMap in="SourceGraphic" scale="1.6"/></filter></defs>
         <circle class="wheel-bg" r="99"/>
+        <circle class="wheel-rim" r="97.5"/>
         ${signArcs}
         <circle class="wheel-hub" r="46"/>
       </svg>
       ${signButtons}
       <button type="button" class="wheel-center" data-act="signs-cancel" aria-label="Cancel">
-        <span class="wc-k">Chalk</span>
         <span class="wc-l" data-r="signLabel">Pick a mark</span>
         <span class="wc-h">${n > 1 ? `1 to ${Math.min(n, 9)}` : '1'} &middot; Esc</span>
       </button>
@@ -325,25 +332,21 @@ export function createUI(opts = {}) {
   <!-- TITLE -->
   <section class="screen scr-title layer" data-screen="title" role="dialog" aria-modal="true" aria-labelledby="l0-wm">
     <div class="scrim scrim-title"></div>
-    <div class="grain-ov"></div>
     <div class="title-grid">
       <header class="title-top rv" style="--i:0">
-        <div class="vhs" aria-hidden="true"><i class="vhs-dot"></i><span>CAM 00</span><span data-r="vhsDate"></span><span data-r="vhsClock"></span></div>
-        <div class="title-who">
-          <div class="chip" data-r="chip" hidden><img alt="" data-r="avatar" width="28" height="28" decoding="async"><span data-r="uname"></span></div>
-          <div class="online"><i class="pip"></i><b data-r="onlineT">0</b><span>online</span></div>
-        </div>
+        <div class="chip" data-r="chip" hidden><img alt="" data-r="avatar" width="28" height="28" decoding="async"><span data-r="uname"></span></div>
+        <div class="online"><i class="pip"></i><b data-r="onlineT">0</b><span>online</span></div>
       </header>
 
       <main class="title-main">
-        <h1 class="wordmark rv" style="--i:1" id="l0-wm" aria-label="Level 0"><span class="wm-level" aria-hidden="true">LEVEL</span>${zeroSvg}</h1>
-        <p class="tagline rv" style="--i:2">You are not supposed to be here.</p>
+        <h1 class="wordmark" id="l0-wm" aria-label="Level 0"><span class="tw" aria-hidden="true">${tubeWord('LEVEL 0', { 3: 'wm-e', 6: 'wm-0' })}</span></h1>
+        <p class="tagline rv" style="--i:1">You are not supposed to be here.</p>
 
         ${lou15 ? `
-        <div class="onboard rv" style="--i:3">
+        <div class="onboard rv" style="--i:2">
           <label class="field">
             <span class="field-k">Name on the suit</span>
-            <input type="text" data-r="name" maxlength="16" autocomplete="nickname" autocapitalize="off" spellcheck="false" enterkeyhint="go" placeholder="2 to 16 characters" aria-describedby="l0-name-hint">
+            <span class="nameplate">${screws}<input type="text" data-r="name" maxlength="16" autocomplete="nickname" autocapitalize="off" spellcheck="false" enterkeyhint="go" placeholder="2 to 16 characters" aria-describedby="l0-name-hint"></span>
             <span class="field-h" id="l0-name-hint" data-r="nameHint">Letters, digits, space, _ and -</span>
           </label>
           <label class="check">
@@ -354,33 +357,33 @@ export function createUI(opts = {}) {
         </div>` : ''}
 
         <div class="status rv" style="--i:3" data-r="statusWrap">
+          <span class="status-bar" data-r="statusBar" aria-hidden="true"><i data-r="progress"></i></span>
           <span class="status-t" data-r="status" role="status"></span>
-          <span class="status-bar" data-r="statusBar"><i data-r="progress"></i></span>
         </div>
 
         <div class="enter-row rv" style="--i:4">
-          <button type="button" class="btn-enter" data-act="play" data-r="enter" data-autofocus>
-            <i class="enter-lamp" aria-hidden="true"></i>
-            <span class="enter-l" data-r="enterL">Enter</span>
-            ${icon('arrow', 'enter-ico')}
+          <button type="button" class="btn-sign btn-enter" data-act="play" data-r="enter" data-autofocus>
+            <span class="bs-l" data-r="enterL">Enter</span>${icon('arrow', 'bs-ico')}
           </button>
           <span class="enter-note" data-r="enterNote"></span>
         </div>
 
         <nav class="title-menu rv" style="--i:5" aria-label="Menu">
-          ${panelBtn('settings', 'Settings', '01')}
-          ${panelBtn('catalog', 'Catalog', '02')}
-          ${panelBtn('leaderboard', 'Leaderboard', '03')}
-          ${panelBtn('howto', 'How to play', '04')}
+          ${panelBtn('settings', 'Settings')}
+          ${menuItem('map', 'Map')}
+          ${panelBtn('catalog', 'Catalog')}
+          ${panelBtn('leaderboard', 'Leaderboard')}
+          ${panelBtn('howto', 'How to play')}
+          ${panelBtn('credits', 'Credits')}
         </nav>
 
-        <dl class="title-stats rv" style="--i:6" data-r="stats" hidden></dl>
+        <p class="title-stats rv" style="--i:6" data-r="stats" hidden></p>
       </main>
 
       <footer class="title-foot rv" style="--i:7">
         <div class="foot-links">
-          ${extLink(o.repoUrl, 'foot-link', `<span class="fl-h">${icon('code')}<span>Source code</span>${icon('external', 'ext')}</span><span class="fl-s">Open source. Contributions welcome.</span>`)}
-          ${extLink(o.donateUrl, 'foot-link', `<span class="fl-h"><span class="pizza" aria-hidden="true">\u{1F355}</span><span>Buy me a pizza</span>${icon('external', 'ext')}</span><span class="fl-s">Made by one person. Pizza keeps the lights on.</span>`)}
+          ${extLink(o.repoUrl, 'foot-link tube', `<span class="fl-h">${icon('code', 'fl-ico')}<span>Source code</span>${icon('external', 'ext')}</span><span class="fl-s">Open source. Contributions welcome.</span>`)}
+          ${extLink(o.donateUrl, 'foot-link tube', `<span class="fl-h">${icon('pizza', 'fl-ico')}<span>Buy me a pizza</span>${icon('external', 'ext')}</span><span class="fl-s">Made by one person. Pizza keeps the lights on.</span>`)}
         </div>
         <div class="foot-meta">
           <span class="cnote">Horror. Flashing lights. Headphones recommended.</span>
@@ -398,24 +401,25 @@ export function createUI(opts = {}) {
     <div class="scrim scrim-pause"></div>
     <div class="pause-grid">
       <div class="pause-col">
-        <p class="kicker rv" style="--i:0">Suit hold</p>
-        <h2 class="pause-h rv" style="--i:1" id="l0-pause-h">Paused</h2>
-        <p class="pause-sub rv" style="--i:2">The world does not pause.</p>
+        <h2 class="scr-h pause-h" id="l0-pause-h" aria-label="Paused"><span class="tw" aria-hidden="true">${tubeWord('Paused', { 4: 'wm-e' })}</span></h2>
+        <p class="pause-sub rv" style="--i:1">The world does not pause.</p>
+        <div class="pause-go rv" style="--i:2">${signBtn('resume', 'Resume', 'data-autofocus')}</div>
         <nav class="mlist rv" style="--i:3" aria-label="Pause menu">
-          ${menuItem('resume', 'Resume', '01', 'data-autofocus', 'resume')}
-          ${panelBtn('settings', 'Settings', '02', 'sliders')}
-          ${panelBtn('catalog', 'Catalog', '03', 'catalog')}
-          ${panelBtn('leaderboard', 'Leaderboard', '04', 'board')}
-          ${panelBtn('players', 'Players', '05', 'people')}
-          ${panelBtn('howto', 'Controls', '06', 'keys')}
+          ${menuItem('map', 'Map', '', 'map')}
+          ${panelBtn('settings', 'Settings', 'sliders')}
+          ${panelBtn('catalog', 'Catalog', 'catalog')}
+          ${panelBtn('leaderboard', 'Leaderboard', 'board')}
+          ${panelBtn('players', 'Players', 'people')}
+          ${panelBtn('howto', 'Controls', 'keys')}
+          ${panelBtn('credits', 'Credits', 'help')}
           <span class="mlist-gap" aria-hidden="true"></span>
-          ${extLink(o.repoUrl, 'mi mi-ext', `<span class="idx">07</span>${icon('code', 'mi-ico')}<span class="mi-l">Source code</span>${icon('external', 'ext')}`, 'Source code, opens in a new tab')}
-          ${extLink(o.donateUrl, 'mi mi-ext', `<span class="idx">08</span><span class="pizza mi-ico" aria-hidden="true">\u{1F355}</span><span class="mi-l">Buy me a pizza</span>${icon('external', 'ext')}`, 'Buy me a pizza, opens in a new tab')}
-          ${menuItem('quit', 'Quit to title', '09', '', 'quit')}
+          ${extLink(o.repoUrl, 'mi tube mi-ext', `${icon('code', 'mi-ico')}<span class="mi-l">Source code</span>${icon('external', 'ext')}`, 'Source code, opens in a new tab')}
+          ${extLink(o.donateUrl, 'mi tube mi-ext', `${icon('pizza', 'mi-ico')}<span class="mi-l">Buy me a pizza</span>${icon('external', 'ext')}`, 'Buy me a pizza, opens in a new tab')}
+          <span class="mlist-gap" aria-hidden="true"></span>
+          ${menuItem('quit', 'Quit to title', '', 'quit')}
         </nav>
       </div>
-      <aside class="pause-side rv" style="--i:4" aria-label="Position">
-        <p class="kicker">Last known position</p>
+      <aside class="pause-side rv" style="--i:4" aria-label="Last known position">
         <p class="ps-sector" data-r="psSector">--</p>
         <p class="ps-name" data-r="psName"></p>
         <p class="ps-disc" data-r="psDisc"></p>
@@ -427,17 +431,12 @@ export function createUI(opts = {}) {
   <!-- DEATH -->
   <section class="screen scr-death layer" data-screen="death" role="alertdialog" aria-modal="true" aria-labelledby="l0-death-h" aria-describedby="l0-death-cause">
     <div class="scrim scrim-death"></div>
-    <div class="static" aria-hidden="true"></div>
     <div class="death-wrap">
-      <p class="kicker rv" style="--i:0"><i class="rec-dot"></i>Suit telemetry &middot; channel 0</p>
-      <h2 class="death-h rv" style="--i:1" id="l0-death-h">Signal lost</h2>
-      <svg class="flat rv" style="--i:2" viewBox="0 0 400 40" preserveAspectRatio="none" aria-hidden="true" focusable="false">
-        <path d="M0 20H120l6-3 5 3h20l5-15 7 30 6-22 4 7H400"/>
-      </svg>
-      <p class="death-cause rv" style="--i:3" id="l0-death-cause" data-r="cause"></p>
-      <dl class="tele rv" style="--i:4" data-r="deathTele"></dl>
-      <div class="death-act rv" style="--i:5">
-        <button type="button" class="btn-line" data-act="respawn" data-autofocus>Respawn</button>
+      <h2 class="scr-h death-h" id="l0-death-h" aria-label="Signal lost"><span class="tw" aria-hidden="true">${tubeWord('Signal lost', { 2: 't-fail', 7: 't-dead', 9: 't-fail2' })}</span></h2>
+      <p class="death-cause rv" style="--i:1" id="l0-death-cause" data-r="cause"></p>
+      <dl class="tele rv" style="--i:2" data-r="deathTele"></dl>
+      <div class="death-act rv" style="--i:3">
+        ${signBtn('respawn', 'Respawn', 'data-autofocus')}
         <span class="fine">A new suit is ready.</span>
       </div>
     </div>
@@ -447,31 +446,32 @@ export function createUI(opts = {}) {
   <section class="screen scr-escape layer" data-screen="escape" role="dialog" aria-modal="true" aria-labelledby="l0-esc-h">
     <div class="scrim scrim-escape"></div>
     <div class="escape-wrap">
-      <p class="kicker rv" style="--i:0">Exit located</p>
-      <h2 class="escape-h rv" style="--i:1" id="l0-esc-h">Outside.</h2>
-      <p class="escape-sub rv" style="--i:2">It is very quiet here. You do not remember the door.</p>
-      <dl class="tele rv" style="--i:3" data-r="escTele"></dl>
-      <div class="rv" style="--i:4"><button type="button" class="btn-line btn-dark" data-act="respawn" data-autofocus>Go back in</button></div>
+      <h2 class="scr-h escape-h" id="l0-esc-h" aria-label="Outside."><span class="tw" aria-hidden="true">${tubeWord('Outside.')}</span></h2>
+      <p class="escape-sub rv" style="--i:1">It is very quiet here. You do not remember the door.</p>
+      <dl class="tele rv" style="--i:2" data-r="escTele"></dl>
+      <div class="death-act rv" style="--i:3">${signBtn('respawn', 'Go back in', 'data-autofocus', 'btn-day')}</div>
     </div>
   </section>
 
   <!-- PANELS -->
-  ${sheet('settings', 'Settings', 'L0 / FACILITIES / 01', `<div class="settings" data-r="settingsBody"></div>`)}
-  ${sheet('catalog', 'Catalog', 'L0 / ANOMALOUS OBJECTS', `<p class="sheet-lead" data-r="catLead"></p><div class="cat-grid" data-r="catGrid"></div>`)}
-  ${sheet('leaderboard', 'Leaderboard', 'L0 / RECORDS', `<div data-r="boardBody"></div>`)}
-  ${sheet('players', 'Players', 'L0 / IN THE BUILDING', `<div data-r="playersBody"></div>`)}
-  ${sheet('howto', 'How to play', 'L0 / ORIENTATION', howtoHtml())}
+  ${sheet('settings', 'Settings', `<div class="settings" data-r="settingsBody"></div>`)}
+  ${sheet('catalog', 'Catalog', `<p class="sheet-lead" data-r="catLead"></p><div class="cat-grid" data-r="catGrid"></div>`)}
+  ${sheet('leaderboard', 'Leaderboard', `<div data-r="boardBody"></div>`)}
+  ${sheet('players', 'Players', `<div data-r="playersBody"></div>`)}
+  ${sheet('howto', 'How to play', howtoHtml())}
+  ${sheet('credits', 'Credits', `<div data-r="creditsBody"></div>`)}
   `;
 
-  function sheet(name, title, kicker, body) {
+  function sheet(name, title, body) {
     return `
     <div class="sheet layer" data-panel="${name}" role="dialog" aria-modal="true" aria-labelledby="l0-p-${name}">
       <div class="sheet-scrim" data-act="back"></div>
-      <div class="sheet-card">
+      <div class="sheet-card plate">
         <header class="sheet-head">
+          ${screws}
           <button type="button" class="icon-btn sheet-back" data-act="back" aria-label="Back">${icon('back')}</button>
-          <div class="sheet-ttl"><p class="kicker">${kicker}</p><h2 id="l0-p-${name}">${title}</h2></div>
-          <button type="button" class="icon-btn" data-act="back" aria-label="Close">${icon('close')}</button>
+          <h2 class="sheet-ttl" id="l0-p-${name}">${title}</h2>
+          <button type="button" class="icon-btn sheet-close" data-act="back" aria-label="Close">${icon('close')}</button>
         </header>
         <div class="sheet-body">${body}</div>
       </div>
@@ -482,7 +482,7 @@ export function createUI(opts = {}) {
     const rows = [
       [['W', 'A', 'S', 'D'], 'Move'], [['Mouse'], 'Look'], [['Shift'], 'Sprint'], [['C', 'Ctrl'], 'Crouch'],
       [['F'], 'Flashlight'], [['E'], 'Interact'], [['Q'], 'Leave a chalk sign'], [['V'], 'Hold to talk'],
-      [['Tab'], 'Players'], [['Esc'], 'Pause'],
+      [['M'], 'Survey map'], [['R'], 'Handheld radar and map'], [['Tab'], 'Players'], [['Esc'], 'Pause'],
     ];
     const keys = (ks) => ks.map((k, i) => `${i && ks.length === 2 ? '<span class="or">or</span>' : ''}<kbd>${k}</kbd>`).join('');
     const touchRows = [['Left thumb', 'Move. Push to the edge to sprint'], ['Right side', 'Drag to look'], ['Buttons', 'Light, crouch, chalk, interact']];
@@ -505,7 +505,7 @@ export function createUI(opts = {}) {
         </section>
         <section class="ht-sec">
           <h3 class="ht-h">Survival</h3>
-          <ol class="rules">${rules.map(([a, b], i) => `<li><span class="rn">${pad(i + 1, 2)}</span><p><b>${a}</b> ${b}</p></li>`).join('')}</ol>
+          <ul class="rules">${rules.map(([a, b]) => `<li><p><b>${a}</b> ${b}</p></li>`).join('')}</ul>
         </section>
       </div>`;
   }
@@ -583,8 +583,6 @@ export function createUI(opts = {}) {
     root.classList.toggle('voice-on', !!settings.voice);
     root.classList.toggle('touch-dev', touch.enabled);
     root.classList.toggle('reduce-visor', !settings.visor);
-    if (st.screen === 'title' && !clockTimer) startClock();
-    if (st.screen !== 'title' && clockTimer) { clearInterval(clockTimer); clockTimer = 0; }
   }
 
   function openPanel(name) {
@@ -592,6 +590,7 @@ export function createUI(opts = {}) {
     if (name === 'catalog') renderCatalog();
     if (name === 'leaderboard') renderBoard();
     if (name === 'players') renderPlayers();
+    if (name === 'credits') renderCredits();
     st.returnFocus.push(document.activeElement);
     st.panels.push(name);
     refresh();
@@ -655,6 +654,7 @@ export function createUI(opts = {}) {
     else if (act === 'resume') emit('resume');
     else if (act === 'respawn') emit('respawn');
     else if (act === 'quit') emit('quit');
+    else if (act === 'map') emit('map');
   });
 
   function canPlay() {
@@ -750,14 +750,6 @@ export function createUI(opts = {}) {
   Object.defineProperty(st, 'menuVisible', { get: () => st.screen !== 'none' || st.panels.length > 0 });
 
   /* ======================================================= TITLE */
-  let clockTimer = 0;
-  function tickClock() {
-    const d = new Date();
-    R.vhsClock.textContent = `${pad(d.getHours(), 2)}:${pad(d.getMinutes(), 2)}:${pad(d.getSeconds(), 2)}`;
-    R.vhsDate.textContent = `${d.getFullYear()}.${pad(d.getMonth() + 1, 2)}.${pad(d.getDate(), 2)}`;
-  }
-  function startClock() { tickClock(); clockTimer = setInterval(tickClock, 1000); }
-
   function setOnline(nn) {
     const v = Math.max(0, Math.round(num(nn)));
     st.online = v;
@@ -768,14 +760,15 @@ export function createUI(opts = {}) {
     const s = st.title.stats;
     if (!s || !Object.values(s).some((v) => num(v) > 0)) { R.stats.hidden = true; return; }
     const total = o.artifacts.length;
+    const plural = (v, one, many) => `<b>${v}</b> ${v === 1 ? one : many}`;
     const items = [
-      ['Sectors', num(s.sectors)],
-      ['Artifacts', total ? `${num(s.artifacts)}<small>/${total}</small>` : num(s.artifacts)],
-      ['Escapes', num(s.escapes)],
-      ['Deaths', num(s.deaths)],
-      ['Farthest', `${Math.round(num(s.farthest))}<small>m</small>`],
+      plural(num(s.sectors), 'sector', 'sectors'),
+      total ? `<b>${num(s.artifacts)}</b> of ${total} artifacts` : plural(num(s.artifacts), 'artifact', 'artifacts'),
+      plural(num(s.escapes), 'escape', 'escapes'),
+      plural(num(s.deaths), 'death', 'deaths'),
+      `<b>${Math.round(num(s.farthest))} m</b> farthest`,
     ];
-    R.stats.innerHTML = items.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+    R.stats.innerHTML = items.map((v) => `<span>${v}</span>`).join(' ');
     R.stats.hidden = false;
   }
   function showTitle(info = {}) {
@@ -820,7 +813,7 @@ export function createUI(opts = {}) {
       const v = clamp(num(d[k], 1), 0, 1);
       const q = Math.ceil(v * SEG - 0.001);
       const r = vit[k];
-      if (changed(k + ':q', q)) r.fill.style.clipPath = `inset(0 ${((SEG - q) / SEG) * 100}% 0 0)`;
+      if (changed(k + ':q', q)) r.fill.style.clipPath = `inset(0 ${((SEG - q) / SEG) * 100}% 0 0 round 3px)`;
       setText(r.n, k + ':n', pad(v * 100, 3));
       const low = v < 0.25;
       if (changed(k + ':low', low)) r.el.classList.toggle('low', low);
@@ -936,16 +929,19 @@ export function createUI(opts = {}) {
     const d = new Date();
     const stamp = `${pad(d.getHours(), 2)}:${pad(d.getMinutes(), 2)}:${pad(d.getSeconds(), 2)}`;
     const head = String(t.title || 'New sector').toUpperCase();
-    const letters = [...head].map((c, i) => `<span style="--c:${i}">${c === ' ' ? '&nbsp;' : esc(c)}</span>`).join('');
+    // each letter is a tube that strikes on its own, in a slightly uneven order
+    const r = rng(hash(head + stamp));
+    const letters = [...head].map((c, i) => (c === ' '
+      ? '<span class="tl-sp"> </span>'
+      : `<span class="tl" style="--c:${(i * 70 + r() * 160).toFixed(0)}ms">${esc(c)}</span>`)).join('');
     const where = [st.hud.sector, st.hud.sectorName].filter(Boolean).map(esc).join(' &middot; ');
     const el = document.createElement('div');
     el.className = 'disc';
     el.innerHTML = `
-      <span class="disc-k">${where || 'Sector'}</span>
       <span class="disc-t" aria-hidden="true">${letters}</span>
       <i class="disc-rule"></i>
       ${t.sub ? `<span class="disc-s">${esc(t.sub)}</span>` : ''}
-      <span class="disc-f">Logged ${stamp}. This record does not expire.</span>`;
+      <span class="disc-f">${where ? `${where}. ` : ''}Logged ${stamp}. This record does not expire.</span>`;
     R.discStage.appendChild(el);
     setTimeout(() => {
       el.classList.add('out');
@@ -1023,10 +1019,10 @@ export function createUI(opts = {}) {
     }
   }
   function teleRows(rows) {
-    return rows.map(([k, v]) => `<div><dt>${k}</dt><dd>${v}</dd></div>`).join('');
+    return rows.map(([k, v]) => `<div><dt>${k}</dt><i aria-hidden="true"></i><dd>${v}</dd></div>`).join('');
   }
   function showDeath(info = {}) {
-    R.cause.innerHTML = `<span>Cause</span> ${esc(info.cause || 'Unknown')}`;
+    R.cause.innerHTML = `<span class="cause-k">Cause</span> <span class="cause-v">${esc(info.cause || 'Unknown')}</span>`;
     R.deathTele.innerHTML = teleRows([
       ['Sectors crossed', esc(num(info.sectors))],
       ['Time inside', esc(fmtTime(info.time))],
@@ -1077,6 +1073,23 @@ export function createUI(opts = {}) {
         ? `<article class="spec found"><div class="spec-sig">${sigil(a.id)}</div><p class="spec-no">${no}</p><h3 class="spec-n">${esc(a.name)}</h3><p class="spec-d">${esc(a.desc)}</p></article>`
         : `<article class="spec" aria-label="${no}, unrecorded"><div class="spec-sig">${sigil(a.id)}</div><p class="spec-no">${no}</p><h3 class="spec-n">Unrecorded</h3><p class="spec-d redact" aria-hidden="true"><i style="width:${60 + (hash(a.id) % 30)}%"></i><i style="width:${30 + (hash(a.id + 'x') % 40)}%"></i></p></article>`;
     }).join('');
+  }
+
+  /* -------------------------------------------------- credits */
+  function renderCredits() {
+    const list = Array.isArray(o.credits) ? o.credits.filter((c) => c && typeof c === 'object') : [];
+    const lead = 'LEVEL 0 is open source (MIT). The typeface Troffer was drawn for this game (SIL Open Font License).';
+    R.creditsBody.innerHTML = `
+      <p class="sheet-lead">${lead}${list.length ? ' These models are used under Creative Commons Attribution 4.0:' : ''}</p>
+      ${list.length ? `<ul class="credits">${list.map((c) => {
+        const url = /^https?:\/\//i.test(String(c.url || '')) ? String(c.url) : '';
+        return `<li class="cr">
+          ${c.what ? `<span class="cr-what">${esc(c.what)}</span>` : ''}
+          <span class="cr-title">${esc(c.title || 'Untitled')}</span>
+          ${c.author ? `<span class="cr-by">by ${esc(c.author)}</span>` : ''}
+          <span class="cr-meta">${c.license ? `<span class="cr-lic">${esc(c.license)}</span>` : ''}${url ? `<a class="cr-link" href="${esc(url)}" target="_blank" rel="noopener" data-act="link">${esc(url.replace(/^https?:\/\//i, '').replace(/\/$/, ''))}${icon('external', 'ext')}</a>` : ''}</span>
+        </li>`;
+      }).join('')}</ul>` : ''}`;
   }
 
   /* -------------------------------------------------- leaderboard / players */

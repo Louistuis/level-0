@@ -3,7 +3,7 @@
 // so everybody nearby sees (and is hunted by) the same ones.
 import * as THREE from './three.module.min.js';
 import { S, clamp, damp, angDiff, lerp } from './util.js';
-import { makeSuit, animSuit, makeLongarm, animLongarm, makeEyes, makeChair, makeDoor, makeTag } from './props.js';
+import { makeSuit, animSuit, makeLongarm, animLongarm, makeEyes, makeChair, makeDoor, makeTag, startPack, packWarmSuit } from './props.js';
 
 const rnd = (a, b) => a + Math.random() * (b - a);
 let NEXT = 1;
@@ -205,6 +205,16 @@ export class Entities {
   }
 
   update(dt, t, pl, game) {
+    startPack(this.M); // the optional model pack: once, in the background, after play has begun
+    // warm the two pack suits one after the other, a few frames apart, shrunk to nothing under the floor
+    if (this._warm !== 3) {
+      const w = this._warmObj || (this._warmObj = []);
+      this._warmN = (this._warmN || 0) + 1;
+      if (!this._warm && this._warmN % 12 === 0) { const g = packWarmSuit(this.M, true); if (g) { w.push(g); this.scene.add(g); this._warm = 1; this._warmN = 0; } }
+      else if (this._warm === 1 && this._warmN === 12) { const g = packWarmSuit(this.M, false); if (g) { w.push(g); this.scene.add(g); } this._warm = 2; this._warmN = 0; }
+      else if (this._warm === 2 && this._warmN === 12) { for (const g of w) this.scene.remove(g); this._warmObj = null; this._warm = 3; }
+      for (const g of w) g.position.set(pl.x, pl.y - 3, pl.z);
+    }
     const T = this.targets(pl, game);
     // spawning
     this.spawnT -= dt;

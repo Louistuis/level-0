@@ -13,17 +13,19 @@ Everyone plays in the same world. It is generated as people walk into it, and a 
 
 ![Not every suit has someone in it](docs/things.jpg)
 
-No build step, no game engine, no image or sound files. Everything you see and hear is generated in the browser.
+No build step and no game engine. The level, the light, the textures and every sound are generated in the browser. The only files it loads are its own typeface and a small pack of 3D models (suits, an exit door, a few pieces of furniture), credited in [CREDITS.md](CREDITS.md).
 
 ## What is in it
 
-- **The level**: 28.8 m sectors built from a seed. Office floors, partition warrens, pillar halls, sunken courts, mezzanines, service tunnels, dead grids with no power, stairs that go into the ceiling, rooms under the floor.
+- **The level**: built from a seed as people walk into it, and laid out so one kind of place runs into the next without a hard line. Office floors, partition warrens, pillar halls, sunken courts, mezzanines, service tunnels, dead grids with no power, stairs that go into the ceiling, rooms under the floor.
 - **Light**: every ceiling panel is a real light with soft shadows, flicker and bounce. Some are dying. Some go out when something is near.
 - **The suit**: visor frame, scratches, breath on the plate, cracks when you are hurt, a small readout projected on the inside.
 - **Things**: a tall one that hunts by sound and sight, an empty suit that only moves when nobody is looking at it, and a patch of dark that eats the lamps.
 - **Anomalies**: chairs and doors that are there when you look back, writing that was not on the wall a moment ago, blackouts, voices.
 - **Artifacts**: twelve objects to find. The catalog is in the menu.
 - **Other people**: you see their suits and their flashlights. Hold V to talk to people near you (opt-in, peer to peer). Press Q to leave a chalk sign on the floor for everyone who comes after you.
+- **The survey**: press M for a hand-drawn floor plan of everything that has been walked so far: yours in ink, other people's in pencil, with names, chalk signs and bearings.
+- **The handheld**: press R for an analog radar and a scrap of the map to carry while you walk. It finds people nearby. It is not always right about what else is nearby.
 - **Exits**: rare, far out. Finding one is recorded on the leaderboard.
 
 ## Controls
@@ -37,6 +39,8 @@ No build step, no game engine, no image or sound files. Everything you see and h
 | F | Flashlight |
 | E | Interact |
 | Q | Leave a chalk sign |
+| M | Floor survey (map) |
+| R | Handheld radar |
 | V | Hold to talk |
 | Tab | Players and leaderboard |
 | Esc | Pause |
@@ -73,9 +77,14 @@ dist/                 the whole game, served as is
   js/audio.js         all sound, synthesized with WebAudio
   js/net.js           WebSim, own-server and offline transports behind one interface
   js/voice.js         proximity voice (WebRTC)
+  js/map.js           the floor survey (hand-drawn map)
+  js/handheld.js      handheld radar and map scrap
+  js/assets.js        loader and credits for the model pack
   js/ui.js            menus, HUD, touch controls
+  assets/             Troffer typeface, model pack (GLB)
 server/server.mjs     tiny WebSocket relay and world store (one JSON file)
 deploy/               Cloudflare Worker and systemd unit for backrooms.lou15.com
+tools/                font builder (Troffer), model pack builder, world generator test
 ```
 
 Two editions run the same code. Inside WebSim the game uses WebSim's multiplayer rooms and database. Anywhere else it talks to `server/server.mjs`. If neither is reachable it still works, alone.
@@ -91,7 +100,7 @@ Issues and pull requests are welcome. Things that would help most:
 - Performance on low-end phones
 - Sound design passes in `audio.js`
 
-Keep it dependency-free in `dist/`, and keep the world deterministic: the same seed must always build the same sector, or players stop sharing a world.
+Keep `dist/` free of dependencies beyond the vendored three.js, and keep the world deterministic: the same seed must always build the same sector, or players stop sharing a world.
 
 ## Support
 
@@ -99,4 +108,4 @@ If you like it, you can [buy me a pizza](https://www.buymeacoffee.com/louis9987)
 
 ## License
 
-MIT. See [LICENSE](LICENSE). three.js is included under its own MIT license. The WebSim logo in `dist/assets` belongs to WebSim and is shown in the WebSim edition with their permission; it is not covered by the MIT license.
+MIT for the code. See [LICENSE](LICENSE). three.js is included under its own MIT license. The 3D models in `dist/assets/pack` are CC BY 4.0 by their authors and the Troffer typeface is under the SIL Open Font License 1.1; both are listed in [CREDITS.md](CREDITS.md) and are not covered by the MIT license. The WebSim logo in `dist/assets` belongs to WebSim and is shown in the WebSim edition with their permission; it is not covered by the MIT license.

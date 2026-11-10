@@ -12,16 +12,19 @@ import { Entities, Anomalies } from './entities.js';
 import { makeMats, SectorProps, Signs } from './props.js';
 import { connect, LS } from './net.js';
 import { Voice } from './voice.js';
+import { createMap } from './map.js';
+import { createHandheld } from './handheld.js';
+import { CREDITS } from './assets.js';
 import { S, SEC, SEC_M, MAPN, CEIL, ARTIFACTS, SIGNS, hash3, WORLD_SEED, clamp, damp, mod, sectorCode } from './util.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const REPO = 'https://github.com/Louistuis/level-0';
 const DONATE = 'https://www.buymeacoffee.com/louis9987';
 const Q = new URLSearchParams(location.search);
 const edition = Q.get('edition') || ((window.WebsimSocket || /websim/.test(location.hostname)) ? 'websim' : 'lou15');
 const ATTRACT = 1000; // the menu backdrop lives in a sector nobody can walk to
 
-const ui = createUI({ version: VERSION, edition, repoUrl: REPO, donateUrl: DONATE, artifacts: ARTIFACTS, signs: SIGNS });
+const ui = createUI({ version: VERSION, edition, repoUrl: REPO, donateUrl: DONATE, artifacts: ARTIFACTS, signs: SIGNS, credits: CREDITS });
 const set = ui.settings;
 const canvas = document.getElementById('view');
 const R = new Renderer(canvas);
@@ -50,7 +53,7 @@ let net = null;
 const attractSeeds = new Map();
 function attractSeed(sx, sz) {
   const k = sx + ',' + sz; let v = attractSeeds.get(k);
-  if (v === undefined) { for (let i = 0; i < 40; i++) { v = hash3(sx, sz, (WORLD_SEED ^ 0x77) + i); if (/classic|pillars|pit|mezz/.test(genSector(sx, sz, v).type)) break; } attractSeeds.set(k, v); }
+  if (v === undefined) { v = hash3(sx, sz, WORLD_SEED ^ 0x77); attractSeeds.set(k, v); } // the layout no longer depends on the seed; worldgen keeps this far sector calm and lit
   return v;
 }
 const world = new World(scene, null, {
@@ -89,6 +92,7 @@ const saveKey = () => 'level0.save.' + (net ? net.kind : edition);
 function loadSave() { return LS.get(saveKey(), null); }
 function writeSave(keepPos = true) {
   if (!net) return;
+  try { LS.set('level0.mapcache', [...net.claims].slice(-3000).map(([k, c]) => [k, c.seed, c.by, c.mine ? 1 : 0])); } catch (e) { /* storage full */ }
   LS.set(saveKey(), { v: 1, pos: keepPos && G.alive ? [pl.x, pl.y, pl.z, pl.yaw] : null, health: G.health, sanity: G.sanity, battery: G.battery, arts: G.arts, taken: G.taken, visited: G.visited, stats: G.stats, playT: G.playT });
 }
 
@@ -98,11 +102,14 @@ const locked = () => document.pointerLockElement === canvas;
 function lock() { if (ui.touch.enabled) return; try { const p = canvas.requestPointerLock(); if (p && p.catch) p.catch(() => {}); } catch { /* not allowed here */ } }
 addEventListener('keydown', (e) => {
   if (e.code === 'Tab') { e.preventDefault(); if (G.state === 'play' && !e.repeat) ui.showRoster(true); }
+  if (e.code === 'KeyM' && !e.repeat && !map.isOpen && !G.wheel && (G.state === 'play' || G.state === 'title') && !(e.target && /INPUT|TEXTAREA/.test(e.target.tagName || ''))) { e.preventDefault(); map.open(); return; }
+  if (map.isOpen) return;
   if (G.state !== 'play' || e.repeat) return;
   if (ui.menuOpen && !G.wheel) return;
   keys.add(e.code);
   if (e.code === 'KeyF') toggleFlash();
   else if (e.code === 'KeyE') interact();
+  else if (e.code === 'KeyR') hand.toggle();
   else if (e.code === 'KeyQ' && !G.wheel && G.alive) openWheel();
   else if (e.code === 'KeyV') talk(true);
 });
@@ -113,7 +120,7 @@ canvas.addEventListener('mousedown', () => { dragging = true; if (G.state === 'p
 addEventListener('mouseup', () => { dragging = false; });
 addEventListener('mousemove', (e) => { if (G.state !== 'play' || ui.menuOpen) return; if (locked() || dragging) { pl.lookX += e.movementX; pl.lookY += e.movementY; } });
 document.addEventListener('pointerlockchange', () => {
-  if (!locked() && G.state === 'play' && G.alive && !G.wheel && !ui.touch.enabled && !ui.menuOpen) pause(true);
+  if (!locked() && G.state === 'play' && G.alive && !G.wheel && !ui.touch.enabled && !ui.menuOpen && !map.isOpen) pause(true);
 });
 canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 
@@ -134,6 +141,34 @@ async function talk(on) {
 // ---------- ui events ----------
 ui.on('ui', (n) => audio.play(n === 'hover' ? 'uiHover' : n === 'back' ? 'uiBack' : 'uiClick'));
 ui.on('setting', (k) => applySetting(k));
+// Before we are connected (the title screen) the map shows what it knew last time.
+let claimCache = null;
+function cachedClaims() { if (!claimCache) { claimCache = new Map(); for (const r of LS.get('level0.mapcache', []) || []) claimCache.set(r[0], { seed: r[1], by: r[2], mine: !!r[3] }); } return claimCache; }
+// The survey sheet: everything anyone has mapped, drawn by hand. M, or Map in the menus.
+const map = createMap({
+  genSector,
+  getClaims: () => (net ? net.claims : cachedClaims()),
+  getVisited: () => G.visited,
+  getSigns: () => (net ? net.signs || [] : []),
+  getPlayer: () => (G.state === 'play' ? { x: pl.x, z: pl.z, yaw: pl.yaw } : null),
+  getPeers: () => (net ? [...net.peers().values()].filter((p) => p.s && p.s.a).map((p) => ({ x: p.s.x, z: p.s.z, name: p.username })) : []),
+  sound: (n) => { if (audio.ready) audio.play(n === 'back' ? 'uiBack' : 'uiClick'); },
+  onOpen: () => { keys.clear(); talk(false); if (document.pointerLockElement) document.exitPointerLock(); },
+  onClose: () => { if (G.state === 'play' && G.alive && !ui.menuOpen) lock(); },
+});
+ui.on('map', () => map.toggle());
+// The handheld unit: radar and a scrap of the map, readable while walking. R, or the touch button.
+const nearby = () => (net ? [...net.peers().values()].filter((p) => p.s && p.s.a).map((p) => ({ x: p.s.x, z: p.s.z, name: p.username })) : []);
+const hand = createHandheld({
+  map, hint: 'R', isTouch: () => ui.touch.enabled,
+  getPlayer: () => (G.state === 'play' ? { x: pl.x, z: pl.z, yaw: pl.yaw } : null),
+  getPeers: nearby,
+  getThings: () => [...ents.mine, ...ents.remote.values()],
+  sound: (n, o) => { if (audio.ready) audio.play(n, o); },
+});
+// The menu has its own quiet ambience: wake the audio on the first touch of the title screen.
+const wakeAudio = () => { if (G.state === 'title') audio.start().then(() => audio.setMaster(set.volume)); };
+addEventListener('pointerdown', wakeAudio, true); addEventListener('keydown', wakeAudio, true);
 ui.on('play', (p) => { audio.start().then(() => audio.setMaster(set.volume)); lock(); begin(p && p.name); });
 ui.on('resume', () => { audio.start(); pause(false); lock(); });
 ui.on('respawn', () => { audio.start(); lock(); respawn(); });
@@ -146,7 +181,7 @@ ui.on('sign', (id) => {
 });
 ui.on('action', (n) => {
   if (n === 'flashlight') toggleFlash(); else if (n === 'interact') interact(); else if (n === 'sign') openWheel();
-  else if (n === 'crouch') G.tCrouch = !G.tCrouch; else if (n === 'pause') pause(true); else if (n === 'voice') talk(!G.talk); else if (n === 'roster') { G.rosterOn = !G.rosterOn; ui.showRoster(G.rosterOn); }
+  else if (n === 'crouch') G.tCrouch = !G.tCrouch; else if (n === 'pause') pause(true); else if (n === 'voice') talk(!G.talk); else if (n === 'map') map.toggle(); else if (n === 'radar') hand.toggle(); else if (n === 'roster') { G.rosterOn = !G.rosterOn; ui.showRoster(G.rosterOn); }
 });
 // closing the wheel without picking
 addEventListener('keyup', () => { if (G.wheel && !ui.menuOpen) { G.wheel = false; lock(); } });
@@ -206,7 +241,7 @@ function finishLoad() {
   ui.enterGame(); audio.play('respawn'); pl.kick = 0.6;
   if (!G.playT) setTimeout(() => ui.subtitle('You are not supposed to be here.', 5000), 2600);
 }
-function die(cause) {
+function die(cause) { if (map.isOpen) map.close();
   if (!G.alive) return;
   G.alive = false; G.health = 0; G.stats.deaths++; pl.frozen = true; pl.flashOn = false;
   audio.play('death'); if (net) net.send('scream', { x: pl.x, y: pl.y + 1.5, z: pl.z });
@@ -219,7 +254,7 @@ function respawn() {
   G.health = 1; G.sanity = 1; G.battery = Math.max(G.battery, 0.6); G.dmg = 0; G.escaping = 0; G.fade = 1; G.dead = 0; pl.frozen = false; G.wheel = false;
   world.reset(); G.spawnAt = null; pl.place(14.7, 0, 14.7, Math.random() * 6.28); G.state = 'loading'; G.loadT = 0;
 }
-function escape() {
+function escape() { if (map.isOpen) map.close();
   G.stats.escapes++; G.alive = false; pl.frozen = true; audio.play('exit');
   if (locked()) document.exitPointerLock();
   writeSave(false); net.saveStats(statsOut()); G.escaping = 1;
@@ -336,7 +371,7 @@ function step(dt) {
   if (G.state === 'loading') {
     G.loadT += dt;
     ui.setTitleStatus(net && net.claimsReady ? 'Descending' : 'Reading the level', clamp(0.2 + G.loadT * 0.25, 0, 0.95));
-    if (world.ready && missing === 0 && net.claimsReady && G.loadT > 0.6) finishLoad();
+    if (world.ready && missing === 0 && net && net.claimsReady && G.loadT > 0.6) finishLoad();
   }
 
   let L = world.light(pl.x, pl.z);
@@ -377,7 +412,7 @@ function step(dt) {
   U.uFlashPos.value.copy(pl.flashPos); U.uFlashDir.value.copy(pl.flashDir); U.uFlash.value = G.flashK;
   const F = R.fx, ex = Math.max(pl.sprinting ? 0.65 : 0, 1 - pl.stamina);
   G.exertion = damp(G.exertion || 0, ex, 1.2, dt);
-  G.exposure = damp(G.exposure, 1.5 * (1 + 1.1 * (1 - clamp(L / 0.9, 0, 1)) * (pl.flashOn ? 0.2 : 1)), 0.8, dt);
+  G.exposure = damp(G.exposure, 1.2 * (1 + 1.1 * (1 - clamp(L / 0.9, 0, 1)) * (pl.flashOn ? 0.2 : 1)), 0.8, dt);
   G.dmg = damp(G.dmg, 0, 1.6, dt);
   G.dead = damp(G.dead, G.alive ? 0 : 1, 1.2, dt);
   G.blink = damp(G.blink, 0, 1.6, dt); if (G.blink < 0.01) G.blink = 0;
@@ -393,8 +428,9 @@ function step(dt) {
     G.slowT -= dt; if (G.slowT <= 0) { G.slowT = 0.25; G.room = roomSize(); }
     const f = pl.flashDir;
     audio.setListener(cam.position.x, cam.position.y, cam.position.z, -Math.sin(pl.yaw), 0, -Math.cos(pl.yaw));
-    audio.update(dt, { hum: clamp(L / 1.1, 0, 1) * anom.pulse * (1 - ents.inDark), room: G.room, exertion: G.exertion, fear: playing ? ents.fear : 0, sanity: playing ? G.sanity : 1, dark: 1 - clamp(L / 0.4, 0, 1), blackout: Math.max(anom.blackout, ents.inDark), dead: playing && !G.alive });
+    audio.update(dt, { hum: clamp(L / 1.1, 0, 1) * anom.pulse * (1 - ents.inDark), room: G.room, exertion: G.exertion, fear: playing ? ents.fear : 0, sanity: playing ? G.sanity : 1, dark: 1 - clamp(L / 0.4, 0, 1), blackout: Math.max(anom.blackout, ents.inDark), dead: playing && !G.alive, menu: G.state === 'title' });
   }
+  hand.update(dt, { show: playing && G.alive && !ui.menuOpen && !map.isOpen, sanity: G.sanity, fear: ents.fear, speed: pl.speed });
   // network + hud
   if (net && (playing || G.state === 'loading')) { net.setState(stateMsg()); net.tick(); }
   G.hudT -= dt;
@@ -409,7 +445,7 @@ function step(dt) {
   if (playing && G.saveT <= 0) {
     G.saveT = 2;
     if (G.alive) writeSave();
-    signs.sync(net.signs.filter((r) => Math.hypot(r.x - pl.x, r.z - pl.z) < 70), SIGN_IDS);
+    signs.sync(net.signs.filter((r) => Math.hypot(r.x - pl.x, r.z - pl.z) < 70 && !world.solidAt(r.x, r.z) && Math.abs(world.floorAt(r.x, r.z) - (r.y || 0)) < 0.5), SIGN_IDS); // marks from before a layout change may sit in a wall or over a pit: not drawn
     if (G.voice && G.voice.enabled) { const near = []; for (const [id, r] of ents.players) near.push({ id, d: r.d, x: r.x, y: r.y, z: r.z, v: (net.peers().get(id) || {}).s && net.peers().get(id).s.v }); G.voice.update(near); }
     refreshLists();
   }
@@ -450,6 +486,6 @@ function loop(now) {
 addEventListener('beforeunload', () => { if (G.state === 'play') writeSave(); });
 document.addEventListener('visibilitychange', () => { last = performance.now(); if (document.hidden && G.state === 'play') writeSave(); });
 
-window.__g = { G, R, world, pl, ents, anom, ui, audio, mats, cam, step, get net() { return net; }, manual(v) { manual = v; }, sim(n, dt = 1 / 60) { for (let i = 0; i < n; i++) step(dt); return [G.state, +pl.x.toFixed(2), +pl.y.toFixed(2), +pl.z.toFixed(2), world.ready]; } };
+window.__g = { G, R, world, pl, ents, anom, ui, audio, mats, cam, step, map, hand, get net() { return net; }, manual(v) { manual = v; }, sim(n, dt = 1 / 60) { for (let i = 0; i < n; i++) step(dt); return [G.state, +pl.x.toFixed(2), +pl.y.toFixed(2), +pl.z.toFixed(2), world.ready]; } };
 boot().catch((e) => { console.error(e); ui.setTitleStatus('Something went wrong while starting. Reload to try again.', null); });
 requestAnimationFrame(loop);
