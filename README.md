@@ -4,8 +4,14 @@ A first-person multiplayer horror game for the browser. Endless yellow rooms, bu
 
 Everyone plays in the same world. It is generated as people walk into it, and a sector stays the way it was first found, with the name of whoever got there first.
 
-- Play on WebSim: see the link in the repository description
 - Play on our own server: https://backrooms.lou15.com
+- Play on WebSim: https://websim.com/p/gm719rh51w5sl1sez08a
+
+![Title screen](docs/title.jpg)
+
+![A corridor seen through the visor](docs/corridor.jpg)
+
+![Not every suit has someone in it](docs/things.jpg)
 
 No build step, no game engine, no image or sound files. Everything you see and hear is generated in the browser.
 
