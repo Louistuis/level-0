@@ -1,0 +1,15 @@
+{
+  // backrooms.lou15.com: static game from ./dist, /ws proxied to the game server on Nordcore
+  "name": "level0",
+  "main": "deploy/worker.js",
+  "compatibility_date": "2026-09-01",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": ["/ws", "/ws/*"]
+  },
+  "vars": { "WS_ORIGIN": "https://nordcore.lou15.com/level0" },
+  "routes": [
+    { "pattern": "backrooms.lou15.com", "custom_domain": true }
+  ]
+}

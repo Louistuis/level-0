@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="theme-color" content="#0b0a06">
+  <meta name="color-scheme" content="dark">
+  <title>LEVEL 0 UI harness</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230b0a06'/%3E%3Crect x='10' y='5' width='12' height='22' rx='3' fill='none' stroke='%23fbf5dc' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,300..700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="css/style.css">
+  <style>
+    /* placeholder scene: fluorescent office haze + a fake visor gasket */
+    #fake { position: fixed; inset: 0; overflow: hidden; background: #3a3216; }
+    #fake .room { position: absolute; inset: -10%; filter: blur(18px);
+      background:
+        radial-gradient(ellipse 22% 7% at 30% 14%, rgba(255,250,220,.95), transparent 70%),
+        radial-gradient(ellipse 22% 7% at 72% 12%, rgba(255,250,220,.85), transparent 70%),
+        radial-gradient(ellipse 16% 5% at 52% 33%, rgba(255,248,210,.6), transparent 70%),
+        linear-gradient(180deg, #8d7d3c 0%, #a8954a 30%, #7a6a2c 52%, #4c4119 64%, #3a3113 100%);
+    }
+    #fake .pillar { position: absolute; top: 18%; bottom: 20%; width: 9%; background: linear-gradient(90deg, #6b5d26, #9b8a43 40%, #5d5020); filter: blur(6px); }
+    #fake .visor { position: absolute; inset: 0; pointer-events: none;
+      background: radial-gradient(ellipse 58% 60% at 50% 50%, transparent 82%, rgba(6,5,3,.85) 96%, #050402 100%); }
+    #fake.hide-visor .visor { display: none; }
+    #sw { position: fixed; left: 8px; top: 8px; z-index: 100; max-width: 236px; padding: 8px; display: flex; flex-wrap: wrap; gap: 4px;
+      background: rgba(0,0,0,.72); border: 1px solid rgba(255,255,255,.15); font: 11px/1 ui-monospace, Menlo, monospace; border-radius: 4px; }
+    #sw.min > :not(.t) { display: none; }
+    #sw button { font: inherit; color: #ddd; background: #222; border: 1px solid #444; border-radius: 3px; padding: 5px 6px; cursor: pointer; }
+    #sw button:hover { background: #333; }
+    #sw .t { width: 100%; text-align: left; color: #fc6; background: none; border: 0; padding: 2px 0 4px; }
+  </style>
+</head>
+<body>
+  <div id="fake"><div class="room"></div><div class="pillar" style="left:18%"></div><div class="pillar" style="left:66%;width:7%"></div><div class="visor"></div></div>
+  <div id="ui"></div>
+  <div id="sw" aria-label="Demo state switcher"></div>
+  <!-- demo only: cache-bust so edits always show -->
+  <script type="module">const v = Date.now(); document.querySelector('link[href="css/style.css"]').href = `css/style.css?v=${v}`; window.__v = v; import(`./js/ui-demo.js?v=${v}`);</script>
+</body>
+</html>

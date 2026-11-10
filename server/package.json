@@ -1,0 +1,9 @@
+{
+  "name": "level0-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Tiny multiplayer relay and world store for LEVEL 0",
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": { "ws": "^8.18.0" }
+}

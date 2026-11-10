@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LEVEL 0 audio test</title>
+<style>
+  :root { color-scheme: dark; }
+  body { background: #14120c; color: #e8dca0; font: 14px -apple-system, BlinkMacSystemFont, sans-serif; margin: 16px; }
+  button { margin: 3px; padding: 6px 10px; background: #2a2616; color: inherit; border: 1px solid #5a5230; border-radius: 6px; }
+  label { display: inline-block; width: 90px; }
+  input[type=range] { width: 200px; vertical-align: middle; }
+  pre { white-space: pre-wrap; font-size: 12px; opacity: .8; }
+</style>
+</head>
+<body>
+<h1>LEVEL 0 audio test</h1>
+<p><button id="start">Start audio</button> <span id="state">not started</span></p>
+<div id="sliders"></div>
+<p><label>dead</label><input type="checkbox" id="dead"> <label>paused</label><input type="checkbox" id="paused"></p>
+<div id="shots"></div>
+<p>
+  <button data-ent="longarm">longarm</button><button data-ent="hollow">hollow</button><button data-ent="biter">biter</button>
+  <button id="noent">remove entities</button>
+</p>
+<p id="voices"></p>
+<pre id="log"></pre>
+<script type="module">
+import { AudioEngine } from './js/audio.js';
+const A = new AudioEngine();
+window.A = A;
+const st = { hum: 0.7, room: 0.4, exertion: 0, fear: 0, sanity: 1, dark: 0, blackout: 0, dead: false, chase: 0 };
+const sl = document.getElementById('sliders');
+for (const k of ['hum', 'room', 'exertion', 'fear', 'sanity', 'dark', 'blackout', 'chase']) {
+  const p = document.createElement('p');
+  p.innerHTML = `<label>${k}</label><input type="range" min="0" max="1" step="0.01" value="${st[k]}">`;
+  p.querySelector('input').oninput = (e) => { st[k] = +e.target.value; };
+  sl.appendChild(p);
+}
+document.getElementById('dead').onchange = (e) => { st.dead = e.target.checked; };
+document.getElementById('paused').onchange = (e) => A.setPaused(e.target.checked);
+const names = ['flashOn', 'flashOff', 'pickup', 'drink', 'battery', 'discover', 'artifact', 'sign', 'hit', 'death', 'respawn', 'exit',
+  'uiHover', 'uiClick', 'uiBack', 'stinger', 'apparition', 'knock', 'doorSlam', 'geiger', 'radio'];
+const shots = document.getElementById('shots');
+for (const n of names) {
+  const b = document.createElement('button');
+  b.textContent = n;
+  b.onclick = () => A.play(n, (n === 'knock' || n === 'doorSlam') ? { pos: [Math.random() * 20 - 10, 1.5, -8] } : {});
+  shots.appendChild(b);
+}
+for (const k of ['carpet', 'stair', 'crouch', 'land']) {
+  const b = document.createElement('button'); b.textContent = 'step ' + k; b.onclick = () => A.footstep(k, 0.6); shots.appendChild(b);
+}
+const lb = document.createElement('button'); lb.textContent = 'lampTick'; lb.onclick = () => A.lampTick(3, 2.8, -2, 0.8); shots.appendChild(lb);
+const vo = document.getElementById('voices');
+for (const k of ['whisper', 'call', 'laugh', 'cry', 'mimic']) {
+  const b = document.createElement('button'); b.textContent = 'voice ' + k;
+  b.onclick = () => A.whisper(Math.random() * 30 - 15, 1.6, -10 - Math.random() * 15, k); vo.appendChild(b);
+}
+const ents = new Set();
+document.querySelectorAll('[data-ent]').forEach((b) => { b.onclick = () => ents.add(b.dataset.ent); });
+document.getElementById('noent').onclick = () => { for (const e of ents) A.removeEntity(e); ents.clear(); };
+document.getElementById('start').onclick = async () => {
+  await A.start();
+  document.getElementById('state').textContent = 'ready=' + A.ready + ' state=' + (A.ctx && A.ctx.state);
+};
+let last = performance.now(), ang = 0;
+function frame(now) {
+  const dt = (now - last) / 1000; last = now; ang += dt * 0.3;
+  A.setListener(0, 1.6, 0, 0, 0, -1);
+  A.update(dt, st);
+  let i = 0;
+  for (const e of ents) {
+    const a = ang + i++ * 2;
+    A.entity(e, e, Math.cos(a) * 6, 1.6, Math.sin(a) * 6, { chase: st.chase, moving: 1, near: st.fear, vol: 1 });
+  }
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// Headless structural test: every public method with plausible arguments.
+window.runAudioSelfTest = async function (frames = 300) {
+  const log = [];
+  const E = new AudioEngine();
+  // Before start: everything must be a safe no-op.
+  E.setMaster(0); E.setPaused(false); E.setListener(0, 1, 0, 0, 0, -1); E.update(0.016, {});
+  E.footstep('carpet', 1); E.lampTick(0, 0, 0, 1); E.play('hit'); E.entity('a', 'longarm', 0, 0, 0, {});
+  E.removeEntity('a'); E.whisper(0, 0, 0, 'call'); E.attachVoice('v', null); E.setVoicePos('v', 0, 0, 0); E.detachVoice('v');
+  log.push('preStartMic=' + (E.processMic(null) === null));
+  log.push('readyBefore=' + E.ready);
+  E.setMaster(0);
+  await E.start();
+  await E.start(); // idempotent
+  log.push('readyAfter=' + E.ready + ' state=' + E.ctx.state + ' sr=' + E.ctx.sampleRate + ' mobile=' + E._mobile + ' ir4=' + !!E.revShort);
+  const all = ['flashOn', 'flashOff', 'pickup', 'drink', 'battery', 'discover', 'artifact', 'sign', 'hit', 'death', 'respawn', 'exit',
+    'uiHover', 'uiClick', 'uiBack', 'stinger', 'apparition', 'knock', 'doorSlam', 'geiger', 'radio', 'nope', '_thud'];
+  let x = 0;
+  for (let f = 0; f < frames; f++) {
+    const t = f / frames;
+    const s = { hum: 1 - t, room: t, exertion: t, fear: t, sanity: 1 - t, dark: t > 0.5 ? 1 : 0, blackout: t > 0.7 ? 1 : 0, dead: f > frames * 0.9 };
+    x += 0.05;
+    E.setListener(x, 1.6, 0, Math.cos(x), 0, Math.sin(x));
+    E.update(1 / 60, s);
+    E.entity('e1', 'longarm', x + 5, 1.6, 3, { chase: t, vol: 1 });
+    E.entity('e2', 'hollow', x - 4, 1.6, -2, { moving: t > 0.3 ? 1 : 0 });
+    E.entity('e3', 'biter', x, 1.6, 8, { near: t });
+    E.setVoicePos('peer', x + 2, 1.6, 0);
+    if (f % 7 === 0) E.footstep(['carpet', 'stair', 'crouch', 'land', 'bogus'][f % 5], Math.random());
+    if (f % 11 === 0) E.lampTick(x + 3, 2.8, 1, Math.random());
+    if (f % 9 === 0) E.play(all[(f / 9) % all.length | 0], f % 2 ? { pos: [x + 3, 1, 4] } : { vol: 0.5 });
+    if (f % 40 === 0) E.whisper(x + 10, 1.6, -12, ['whisper', 'call', 'laugh', 'cry', 'mimic'][(f / 40) % 5 | 0]);
+    if (f === 50) E.removeEntity('e2');
+    if (f === 60) E.entity('e1', 'biter', 0, 0, 0, {}); // type change
+    if (f === 100) E.setPaused(true);
+    if (f === 150) E.setPaused(false);
+    if (f === 20) {
+      // Fake remote stream from an oscillator.
+      try {
+        const d = E.ctx.createMediaStreamDestination();
+        const o = E.ctx.createOscillator(); o.connect(d); o.start();
+        E.attachVoice('peer', d.stream);
+        const m = E.processMic(d.stream);
+        log.push('processMic new stream=' + (m !== d.stream) + ' tracks=' + m.getAudioTracks().length);
+      } catch (e) { log.push('stream test skipped: ' + e.message); }
+    }
+    if (f === 250) E.detachVoice('peer');
+    if (f % 30 === 0) await new Promise((r) => setTimeout(r, 0));
+  }
+  E.update(0.016, { dead: false });
+  E.play('respawn');
+  E.setListener(NaN, undefined, 'x', 0, 1, 0); // garbage in
+  E.update(NaN, null);
+  log.push('activeVoices=' + E._active + ' entities=' + E._ents.size + ' voices=' + E._vox.size + ' errs=' + E._errs);
+  await new Promise((r) => setTimeout(r, 9000));
+  log.push('activeVoicesAfter9s=' + E._active);
+  try { await E.ctx.close(); } catch (e) { /* ignore */ }
+  return log.join('\n');
+};
+</script>
+</body>
+</html>
