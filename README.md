@@ -48,16 +48,16 @@ The other levels are rare regions far from the entry point. None of them is with
 
 <table>
   <tr>
-    <td width="50%"><img src="docs/level-1.jpg" alt="Level 1"><br><b>Level 1 · Habitable Zone</b><br>Bare concrete, low fog, puddles. Crates of supplies turn up here. So do the long blackouts.</td>
-    <td width="50%"><img src="docs/level-2.jpg" alt="Level 2"><br><b>Level 2 · Pipe Dreams</b><br>Hot service tunnels that never end. Pipes and valves on the walls, very little light, and one of the most dangerous places to be lost.</td>
+    <td width="50%" valign="top"><img src="docs/level-1.jpg" alt="Level 1"><br><b>Level 1 · Habitable Zone</b><br>Bare concrete, low fog, puddles. Crates of supplies turn up here. So do the long blackouts.</td>
+    <td width="50%" valign="top"><img src="docs/level-2.jpg" alt="Level 2"><br><b>Level 2 · Pipe Dreams</b><br>Hot service tunnels that never end. Pipes and valves on the walls, very little light, and one of the most dangerous places to be lost.</td>
   </tr>
   <tr>
-    <td><img src="docs/level-5.jpg" alt="Level 5"><br><b>Level 5 · Terror Hotel</b><br>An old hotel with nobody at the desk. Numbered doors, patterned carpet, wall lamps, a piano somewhere.</td>
-    <td><img src="docs/level-37-pools.jpg" alt="Level 37"><br><b>Level 37 · Sublimity</b><br>White tile and warm, still water, room after room. You wade through the pools. It is the one calm place: almost nothing hunts here, and your head clears while you rest.</td>
+    <td valign="top"><img src="docs/level-5.jpg" alt="Level 5"><br><b>Level 5 · Terror Hotel</b><br>An old hotel with nobody at the desk. Numbered doors, patterned carpet, wall lamps, a piano somewhere.</td>
+    <td valign="top"><img src="docs/level-37-pools.jpg" alt="Level 37"><br><b>Level 37 · Sublimity</b><br>White tile and warm, still water, room after room. You wade through the pools. It is the one calm place: almost nothing hunts here, and your head clears while you rest.</td>
   </tr>
   <tr>
-    <td><img src="docs/level-run.jpg" alt="Level !"><br><b>Level ! · Run For Your Life!</b><br>One sealed corridor, a few hundred metres long. Red lamps, alarms, and a door at the far end.</td>
-    <td><img src="docs/horde.jpg" alt="The horde"><br><b>What is behind you on Level !</b><br>It starts slower than you and keeps getting faster. Hold sprint, do not stop, and do not turn round to take a picture like this one.</td>
+    <td valign="top"><img src="docs/level-run.jpg" alt="Level !"><br><b>Level ! · Run For Your Life!</b><br>One sealed corridor, a few hundred metres long. Red lamps, alarms, and a door at the far end.</td>
+    <td valign="top"><img src="docs/horde.jpg" alt="The horde"><br><b>What is behind you on Level !</b><br>It starts slower than you and keeps getting faster. Hold sprint, do not stop, and do not turn round to take a picture like this one.</td>
   </tr>
 </table>
 
@@ -67,14 +67,14 @@ Seven of them. Meeting one adds a field note to your Catalog, which is the only 
 
 <table>
   <tr>
-    <td width="33%"><img src="docs/entity-howler.jpg" alt="Howler"><br><b>Howler</b><br>Tall, and it hunts by sound before it hunts by sight. Walk, crouch, break its line of sight and stay quiet.</td>
-    <td width="33%"><img src="docs/entity-hollow.jpg" alt="Hollow"><br><b>Hollow</b><br>An empty suit. It only moves when nobody is looking at it. Keep it in view while you leave.</td>
-    <td width="33%"><img src="docs/entity-smiler.jpg" alt="Smiler"><br><b>Smiler</b><br>Teeth and eyes in the dark. Light and running draw it. Hold its gaze and back away slowly.</td>
+    <td width="33%" valign="top"><img src="docs/entity-howler.jpg" alt="Howler"><br><b>Howler</b><br>Tall, and it hunts by sound before it hunts by sight. Walk, crouch, break its line of sight and stay quiet.</td>
+    <td width="33%" valign="top"><img src="docs/entity-hollow.jpg" alt="Hollow"><br><b>Hollow</b><br>An empty suit. It only moves when nobody is looking at it. Keep it in view while you leave.</td>
+    <td width="33%" valign="top"><img src="docs/entity-smiler.jpg" alt="Smiler"><br><b>Smiler</b><br>Teeth and eyes in the dark. Light and running draw it. Hold its gaze and back away slowly.</td>
   </tr>
   <tr>
-    <td><img src="docs/entity-skin-stealer.jpg" alt="Skin-Stealer"><br><b>Skin-Stealer</b><br>It wears a wanderer's suit and a name, sometimes the name of someone who really is nearby, and it waves you over. Look twice before you walk up to a friend.</td>
-    <td><img src="docs/entity-hound.jpg" alt="Hound"><br><b>Hound</b><br>On all fours, and fast. It chases what runs. Face it, stand your ground, back off slowly.</td>
-    <td><img src="docs/entity-faceling.jpg" alt="Faceling"><br><b>Faceling</b><br>Someone with no face at the end of the hall. Leave it alone and keep your lamp off it.</td>
+    <td valign="top"><img src="docs/entity-skin-stealer.jpg" alt="Skin-Stealer"><br><b>Skin-Stealer</b><br>It wears a wanderer's suit and a name, sometimes the name of someone who really is nearby, and it waves you over. Look twice before you walk up to a friend.</td>
+    <td valign="top"><img src="docs/entity-hound.jpg" alt="Hound"><br><b>Hound</b><br>On all fours, and fast. It chases what runs. Face it, stand your ground, back off slowly.</td>
+    <td valign="top"><img src="docs/entity-faceling.jpg" alt="Faceling"><br><b>Faceling</b><br>Someone with no face at the end of the hall. Leave it alone and keep your lamp off it.</td>
   </tr>
 </table>
 
