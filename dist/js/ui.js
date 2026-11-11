@@ -139,7 +139,7 @@ const FOCUSABLE = 'button:not([disabled]), a[href], input:not([disabled]), [tabi
 export function createUI(opts = {}) {
   const o = {
     version: '0.0.0', edition: 'websim', repoUrl: '#', donateUrl: '#',
-    artifacts: [], signs: [], credits: [], ...opts,
+    artifacts: [], signs: [], credits: [], places: [], entities: [], ...opts,
   };
   const lou15 = o.edition === 'lou15';
   const reduced = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -455,7 +455,7 @@ export function createUI(opts = {}) {
 
   <!-- PANELS -->
   ${sheet('settings', 'Settings', `<div class="settings" data-r="settingsBody"></div>`)}
-  ${sheet('catalog', 'Catalog', `<p class="sheet-lead" data-r="catLead"></p><div class="cat-grid" data-r="catGrid"></div>`)}
+  ${sheet('catalog', 'Catalog', `<p class="sheet-lead" data-r="catLead"></p><div data-r="catPlaces"></div><div data-r="catEnts"></div><h3 class="cat-h" data-r="catObjH">Objects</h3><div class="cat-grid" data-r="catGrid"></div>`)}
   ${sheet('leaderboard', 'Leaderboard', `<div data-r="boardBody"></div>`)}
   ${sheet('players', 'Players', `<div data-r="playersBody"></div>`)}
   ${sheet('howto', 'How to play', howtoHtml())}
@@ -490,6 +490,8 @@ export function createUI(opts = {}) {
       ['Stay in the light.', 'Your cell drains. Darkness is where it goes wrong.'],
       ['Sprinting is loud.', 'Air runs out, and things hear you breathing.'],
       ['Some things only move when you are not looking.', 'Keep them in view.'],
+      ['Not everything is hunted the same way.', 'Some chase what runs. Some want you to look away. The Catalog keeps notes on what you have met.'],
+      ['Level 0 is not the only level.', 'Walk far enough and the wallpaper gives way to something else. The exit is a long way in.'],
       ['Drink almond water to keep your head.', 'Cognition slips the longer you stay.'],
       ['Everyone shares this one world.', 'The first person to enter a sector is recorded forever.'],
     ];
@@ -1060,11 +1062,30 @@ export function createUI(opts = {}) {
     if (st.panels.includes('catalog')) renderCatalog();
     renderStats();
   }
+  // Levels walked and entities met (kept in the save, like the objects).
+  function setJournal(j) {
+    st.places = new Set(((j && j.places) || []).map(Number));
+    st.met = new Set(((j && j.entities) || []).map(String));
+    if (st.panels.includes('catalog')) renderCatalog();
+  }
+  function renderJournal() {
+    const places = Array.isArray(o.places) ? o.places : [], ents = Array.isArray(o.entities) ? o.entities : [];
+    const seenP = st.places || new Set([0]), seenE = st.met || new Set();
+    const row = (known, tag, name, text) => (known
+      ? `<li class="note known"><span class="note-tag">${esc(tag)}</span><span class="note-n">${esc(name)}</span><span class="note-d">${esc(text)}</span></li>`
+      : `<li class="note" aria-label="${esc(tag)}, unrecorded"><span class="note-tag">${esc(tag)}</span><span class="note-n">Unrecorded</span><span class="note-d redact" aria-hidden="true"><i style="width:${52 + (hash(tag) % 36)}%"></i></span></li>`);
+    R.catPlaces.innerHTML = places.length ? `<h3 class="cat-h">Levels <span class="cat-c">${places.filter((p) => seenP.has(p.id)).length} of ${places.length}</span></h3>
+      <ul class="notes">${places.map((p) => row(seenP.has(p.id), p.level, p.name, p.blurb)).join('')}</ul>` : '';
+    R.catEnts.innerHTML = ents.length ? `<h3 class="cat-h">Entities <span class="cat-c">${ents.filter((e) => seenE.has(e.code)).length} of ${ents.length}</span></h3>
+      <ul class="notes">${ents.map((e, i) => row(seenE.has(e.code), 'E-' + pad(i + 1, 2), e.name, e.note)).join('')}</ul>` : '';
+    R.catObjH.hidden = !(places.length || ents.length);
+  }
   function renderCatalog() {
+    renderJournal();
     const total = o.artifacts.length;
     const got = o.artifacts.filter((a) => st.found.has(String(a.id))).length;
     R.catLead.innerHTML = total
-      ? `<b>${got}</b> of ${total} recorded. Objects are kept when you leave. They are not always kept when you die.`
+      ? `<b>${got}</b> of ${total} objects recorded. Objects are kept when you leave. They are not always kept when you die.`
       : 'Nothing has been catalogued.';
     R.catGrid.innerHTML = o.artifacts.map((a, i) => {
       const f = st.found.has(String(a.id));
@@ -1078,7 +1099,7 @@ export function createUI(opts = {}) {
   /* -------------------------------------------------- credits */
   function renderCredits() {
     const list = Array.isArray(o.credits) ? o.credits.filter((c) => c && typeof c === 'object') : [];
-    const lead = 'LEVEL 0 is open source (MIT). The typeface Troffer was drawn for this game (SIL Open Font License).';
+    const lead = 'LEVEL 0 is open source (MIT). The typeface Troffer was drawn for this game (SIL Open Font License). The levels and entities come from the Backrooms, a collaborative fiction written by many people on the Backrooms wikis (CC BY-SA 3.0); the wording here is our own.';
     R.creditsBody.innerHTML = `
       <p class="sheet-lead">${lead}${list.length ? ' These models are used under Creative Commons Attribution 4.0:' : ''}</p>
       ${list.length ? `<ul class="credits">${list.map((c) => {
@@ -1423,6 +1444,7 @@ export function createUI(opts = {}) {
     showEscape,
     hideOverlays,
     setCatalog,
+    setJournal,
     setLeaderboard,
     setPlayers,
     openSigns,

@@ -77,7 +77,8 @@ export class Player {
     this.sprinting = wantSprint;
     if (wantSprint) { this.stamina = Math.max(0, this.stamina - dt / 7.5); this.restT = 0; if (this.stamina <= 0) this.winded = true; }
     else { this.restT += dt; if (this.restT > 0.9) this.stamina = Math.min(1, this.stamina + dt / (moving ? 13 : 8)); if (this.stamina > 0.3) this.winded = false; }
-    const top = this.crouch ? 1.05 : (wantSprint ? 4.7 : 2.15) * (this.winded ? 0.85 : 1);
+    // wading: knee-deep water takes about a third off, waist-deep nearly half
+    const top = (this.crouch ? 1.05 : (wantSprint ? 4.7 : 2.15) * (this.winded ? 0.85 : 1)) * (1 - 0.45 * clamp((this.wade || 0) / 0.9, 0, 1));
     const sy = Math.sin(this.yaw), cy = Math.cos(this.yaw);
     const tx = (-sy * mz + cy * mx) * top, tz = (-cy * mz - sy * mx) * top;
     const acc = this.onGround ? 11 : 2;

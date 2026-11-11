@@ -291,13 +291,311 @@ function worldNoise(N = 256) {
 export function makeTextures(aniso = 8) {
   const big = Math.min(aniso, 16) >= 4 ? 1024 : 512;
   const [wc, wn] = wallpaper(big), [cc, cn] = carpet(big), [tc, tn] = ceiling(big);
+  const pl = placeTextures(big, aniso);
   return {
     wall: tex(wc, true, aniso), wallN: tex(wn, false, aniso),
     carpet: tex(cc, true, aniso), carpetN: tex(cn, false, aniso),
     ceil: tex(tc, true, aniso), ceilN: tex(tn, false, aniso),
     noise: worldNoise(256),
     marks: marksAtlas(), signs: signsAtlas(), exit: exitTexture(),
+    place: pl.alb, placeN: pl.nrm,
   };
+}
+
+// ---------- the other places (0.3) ----------
+// Every surface of Levels 1, 2, 5, 37 and ! in one texture array, so the world shader spends two
+// samplers on all of them (phones stop at 16). Layer order is PL below; rgb = albedo (sRGB),
+// a = gloss mask. The normal array holds xyz = normal, a = height. Each layer tiles on its own.
+export const PL = { CWALL: 0, CFLOOR: 1, TILE: 2, DAMASK: 3, WAINS: 4, HCARPET: 5, VINYL: 6, BLOCK: 7, CCEIL: 8, PLASTER: 9 };
+function fbmT(seed, base, oct = 4) {
+  const ns = []; for (let k = 0; k < oct; k++) ns.push(wnoise(base << k, seed + k * 17));
+  return (u, v) => { let s = 0, a = 0.5, t = 0; for (let k = 0; k < oct; k++) { s += ns[k](u * (base << k), v * (base << k)) * a; t += a; a *= 0.5; } return s / t; };
+}
+// draw fn at (x, y) and at its wrapped copies when it is near an edge
+function wrapDraw(N, x, y, r, fn) {
+  for (const ox of [-N, 0, N]) for (const oy of [-N, 0, N]) {
+    if (x + ox + r < 0 || x + ox - r > N || y + oy + r < 0 || y + oy - r > N) continue;
+    fn(x + ox, y + oy);
+  }
+}
+function placeLayer(N, seed, paint) {
+  const c = canvas(N, N), x = c.getContext('2d', { willReadFrequently: true }), hc = canvas(N, N), hx = hc.getContext('2d', { willReadFrequently: true });
+  hx.fillStyle = '#808080'; hx.fillRect(0, 0, N, N);
+  const r = rnd(seed);
+  const o = paint(x, hx, N, r) || {};
+  const col = x.getImageData(0, 0, N, N).data, hh = hx.getImageData(0, 0, N, N).data;
+  const H = new Float32Array(N * N), G = new Float32Array(N * N).fill(o.gloss ?? 0.3);
+  for (let i = 0; i < N * N; i++) H[i] = hh[i * 4] / 255;
+  if (o.post) o.post(col, H, G, r);
+  return { col, H, G, nstr: o.nstr ?? 2 };
+}
+function placeTextures(N, aniso) {
+  const L = [];
+  const S = N / 1024;   // brush scale
+  // 0: board-and-panel formed concrete wall, 2.4 m square: two 1.2 m form panels, tie holes, bugholes, rust
+  L.push(placeLayer(N, 301, (x, hx, N, r) => {
+    const f1 = fbmT(311, 4, 5), f2 = fbmT(312, 16, 3);
+    x.fillStyle = '#7c7870'; x.fillRect(0, 0, N, N);
+    // pour tone per form panel
+    for (let p = 0; p < 2; p++) { x.fillStyle = `rgba(${p ? 70 : 150},${p ? 66 : 146},${p ? 60 : 138},0.06)`; x.fillRect(p * N / 2, 0, N / 2, N); }
+    // tie holes, 4 x 4 per panel pair, with a rust tear below some of them
+    for (let j = 0; j < 4; j++) for (let i = 0; i < 4; i++) {
+      const cx = (i + 0.5) * N / 4, cy = (j + 0.5) * N / 4, rr = 6.5 * S;
+      if (r() < 0.45) { const g = x.createLinearGradient(0, cy, 0, cy + N * (0.06 + r() * 0.12)); g.addColorStop(0, 'rgba(110,62,26,0.35)'); g.addColorStop(1, 'rgba(110,62,26,0)'); x.fillStyle = g; x.fillRect(cx - rr * (0.5 + r()), cy, rr * (1 + r() * 2), N * 0.2); }
+      x.fillStyle = 'rgba(60,56,50,0.55)'; x.beginPath(); x.arc(cx, cy, rr * 1.5, 0, 6.3); x.fill();
+      x.fillStyle = 'rgba(28,26,24,0.9)'; x.beginPath(); x.arc(cx, cy, rr, 0, 6.3); x.fill();
+      hx.fillStyle = '#383838'; hx.beginPath(); hx.arc(cx, cy, rr * 1.2, 0, 6.3); hx.fill();
+      hx.fillStyle = '#101010'; hx.beginPath(); hx.arc(cx, cy, rr * 0.8, 0, 6.3); hx.fill();
+    }
+    // form joints: a small fin of grout that leaked out, dark either side
+    for (const jx of [0, N / 2]) { x.fillStyle = 'rgba(40,38,34,0.5)'; x.fillRect(jx - 2 * S, 0, 4 * S, N); x.fillStyle = 'rgba(190,186,176,0.4)'; x.fillRect(jx - 0.5, 0, 1.5, N); hx.fillStyle = '#c8c8c8'; hx.fillRect(jx - 1, 0, 2.5, N); }
+    x.fillStyle = 'rgba(40,38,34,0.45)'; x.fillRect(0, 0, N, 3 * S); hx.fillStyle = '#c0c0c0'; hx.fillRect(0, 0, N, 2);
+    // bugholes: blown air bubbles
+    for (let i = 0; i < 1100 * S * S + 200; i++) { const px = r() * N, py = r() * N, s = (0.6 + r() * r() * r() * 3.2) * S; x.fillStyle = `rgba(48,46,42,${0.2 + r() * 0.35})`; x.beginPath(); x.arc(px, py, s, 0, 6.3); x.fill(); hx.fillStyle = '#303030'; hx.beginPath(); hx.arc(px, py, s, 0, 6.3); hx.fill(); }
+    return {
+      gloss: 0.12, nstr: 2.4,
+      post(col, H) {
+        for (let y = 0; y < N; y++) for (let xx = 0; xx < N; xx++) {
+          const u = xx / N, v = y / N, i = xx + y * N, a = f1(u, v), b = f2(u, v);
+          const m = 0.78 + 0.4 * a + 0.12 * (b - 0.5) + (Math.random() - 0.5) * 0.06;
+          col[i * 4] *= m; col[i * 4 + 1] *= m; col[i * 4 + 2] *= m * 0.98;
+          H[i] = H[i] * 0.85 + b * 0.15;
+        }
+      },
+    };
+  }));
+  // 1: power-trowelled slab, 3 m: swirl marks, saw cuts on two edges, cracks, oil
+  L.push(placeLayer(N, 302, (x, hx, N, r) => {
+    const f1 = fbmT(321, 4, 5), f3 = fbmT(323, 32, 3);
+    x.fillStyle = '#7d7870'; x.fillRect(0, 0, N, N);
+    for (let i = 0; i < 260; i++) {
+      const px = r() * N, py = r() * N, rad = (30 + r() * 90) * S, a0 = r() * 6.3;
+      wrapDraw(N, px, py, rad, (cx, cy) => { x.strokeStyle = r() < 0.5 ? 'rgba(170,166,156,0.06)' : 'rgba(50,46,40,0.05)'; x.lineWidth = (6 + r() * 14) * S; x.beginPath(); x.arc(cx, cy, rad, a0, a0 + 1.2 + r() * 2); x.stroke(); });
+    }
+    for (let i = 0; i < 9; i++) {
+      const px = r() * N, py = r() * N, rad = (20 + r() * 80) * S;
+      wrapDraw(N, px, py, rad, (cx, cy) => { const g = x.createRadialGradient(cx, cy, 0, cx, cy, rad); g.addColorStop(0, 'rgba(30,26,20,0.35)'); g.addColorStop(0.7, 'rgba(30,26,20,0.16)'); g.addColorStop(1, 'rgba(30,26,20,0)'); x.fillStyle = g; x.fillRect(cx - rad, cy - rad, rad * 2, rad * 2); });
+    }
+    // cracks
+    for (let c = 0; c < 6; c++) {
+      let px = r() * N, py = r() * N, a = r() * 6.3; const n = 30 + r() * 60;
+      x.strokeStyle = 'rgba(30,28,24,0.75)'; hx.strokeStyle = '#202020'; x.lineWidth = (1 + r()) * S; hx.lineWidth = 2 * S;
+      x.beginPath(); hx.beginPath(); x.moveTo(px, py); hx.moveTo(px, py);
+      for (let k = 0; k < n; k++) { a += (r() - 0.5) * 0.9; const nx = px + Math.cos(a) * 6 * S, ny = py + Math.sin(a) * 6 * S; if (nx < 0 || ny < 0 || nx > N || ny > N) break; px = nx; py = ny; x.lineTo(px, py); hx.lineTo(px, py); }
+      x.stroke(); hx.stroke();
+    }
+    for (const [ax, ay, w, h] of [[0, 0, N, 3 * S], [0, 0, 3 * S, N]]) { x.fillStyle = 'rgba(25,23,20,0.85)'; x.fillRect(ax, ay, w, h); hx.fillStyle = '#101010'; hx.fillRect(ax, ay, w, h); }
+    return {
+      gloss: 0.35, nstr: 1.6,
+      post(col, H, G) {
+        for (let y = 0; y < N; y++) for (let xx = 0; xx < N; xx++) {
+          const u = xx / N, v = y / N, i = xx + y * N, a = f1(u, v), s = f3(u, v);
+          const m = 0.8 + 0.38 * a + (s - 0.5) * 0.14 + (Math.random() - 0.5) * 0.08;
+          col[i * 4] *= m; col[i * 4 + 1] *= m; col[i * 4 + 2] *= m;
+          H[i] = H[i] * 0.8 + s * 0.2; G[i] = 0.2 + 0.5 * a;
+        }
+      },
+    };
+  }));
+  // 2: 150 mm glazed white tile, 1.2 m (8 x 8), grout, a slightly wavy glaze
+  L.push(placeLayer(N, 303, (x, hx, N, r) => {
+    const T = N / 8, gw = Math.max(2, 3.2 * S), wav = fbmT(331, 8, 3);
+    x.fillStyle = '#b4b7b1'; x.fillRect(0, 0, N, N); hx.fillStyle = '#404040'; hx.fillRect(0, 0, N, N);
+    for (let j = 0; j < 8; j++) for (let i = 0; i < 8; i++) {
+      const t = 236 + (r() - 0.5) * 10, w = (r() - 0.5) * 5;
+      x.fillStyle = `rgb(${t + w | 0},${t + 2 | 0},${t - w + 1 | 0})`;
+      x.fillRect(i * T + gw / 2, j * T + gw / 2, T - gw, T - gw);
+      // rounded cushion edge in the height
+      for (let k = 0; k < 3; k++) { const g = 150 + k * 35; hx.fillStyle = `rgb(${g},${g},${g})`; const e = gw / 2 + k * S * 1.2; hx.fillRect(i * T + e, j * T + e, T - 2 * e, T - 2 * e); }
+      if (r() < 0.07) { const cx = i * T + (r() < 0.5 ? gw : T - gw), cy = j * T + (r() < 0.5 ? gw : T - gw); x.fillStyle = 'rgba(150,150,140,0.9)'; x.beginPath(); x.arc(cx, cy, (3 + r() * 5) * S, 0, 6.3); x.fill(); hx.fillStyle = '#404040'; hx.beginPath(); hx.arc(cx, cy, (3 + r() * 5) * S, 0, 6.3); hx.fill(); }
+    }
+    return {
+      gloss: 1, nstr: 1.1,
+      post(col, H, G) {
+        for (let y = 0; y < N; y++) for (let xx = 0; xx < N; xx++) {
+          const i = xx + y * N, gx = xx % T, gy = y % T, gr = gx < gw / 2 + 0.5 || gy < gw / 2 + 0.5 || gx > T - gw / 2 - 0.5 || gy > T - gw / 2 - 0.5;
+          if (gr) { G[i] = 0.06; const m = 0.9 + Math.random() * 0.2; col[i * 4] *= m; col[i * 4 + 1] *= m; col[i * 4 + 2] *= m * 0.97; }
+          else { G[i] = 1; H[i] += (wav(xx / N, y / N) - 0.5) * 0.06; }
+        }
+      },
+    };
+  }));
+  // 3: flocked damask wallpaper, 0.6 m, half-drop repeat: oxblood ground, darker velvet medallions, tarnished gold line
+  L.push(placeLayer(N, 304, (x, hx, N, r) => {
+    const f1 = fbmT(341, 4, 4);
+    x.fillStyle = '#5a1a1c'; x.fillRect(0, 0, N, N);
+    const orn = (ctx, cx, cy, s, fill, stroke, lw) => {
+      ctx.save(); ctx.translate(cx, cy); ctx.scale(s, s);
+      for (const m of [1, -1]) {
+        ctx.save(); ctx.scale(m, 1); ctx.beginPath();
+        ctx.moveTo(0, -1); ctx.bezierCurveTo(0.18, -0.78, 0.5, -0.72, 0.42, -0.42); ctx.bezierCurveTo(0.36, -0.22, 0.12, -0.3, 0.2, -0.12);
+        ctx.bezierCurveTo(0.42, -0.06, 0.62, 0.06, 0.5, 0.3); ctx.bezierCurveTo(0.4, 0.5, 0.16, 0.42, 0.12, 0.62); ctx.bezierCurveTo(0.1, 0.8, 0.04, 0.9, 0, 1);
+        ctx.lineTo(0, -1); ctx.closePath();
+        if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+        if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw / s; ctx.stroke(); }
+        // curled side leaves
+        ctx.beginPath(); ctx.moveTo(0.42, -0.42); ctx.bezierCurveTo(0.78, -0.5, 0.9, -0.12, 0.7, 0.0); ctx.bezierCurveTo(0.58, 0.08, 0.5, -0.06, 0.6, -0.12);
+        if (stroke) ctx.stroke();
+        ctx.beginPath(); ctx.arc(0.0, -0.56, 0.07, 0, 6.3); if (stroke) ctx.stroke();
+        ctx.restore();
+      }
+      ctx.restore();
+    };
+    const s = N * 0.21;
+    for (const [cx, cy] of [[N / 2, N / 4], [0, N * 3 / 4], [N, N * 3 / 4], [N / 2, N * 5 / 4], [N / 2, -N * 3 / 4], [0, -N / 4], [N, -N / 4]]) {
+      orn(x, cx, cy, s, '#3e0e12', null, 0); orn(x, cx, cy, s, null, 'rgba(176,128,62,0.55)', 2.2 * S);
+      orn(hx, cx, cy, s, '#b0b0b0', null, 0);
+      orn(x, cx, cy, s * 0.45, '#6a2024', 'rgba(176,128,62,0.45)', 1.6 * S); orn(hx, cx, cy, s * 0.45, '#909090', null, 0);
+    }
+    for (const [cx, cy] of [[0, N / 4], [N, N / 4], [N / 2, N * 3 / 4], [0, -N * 3 / 4 + N], [N / 2, -N / 4]]) {
+      orn(x, cx, cy, s * 0.32, '#43101399', 'rgba(176,128,62,0.45)', 1.4 * S); orn(hx, cx, cy, s * 0.32, '#a0a0a0', null, 0);
+    }
+    // thin vertical pinstripes between the medallions
+    for (const sx of [N / 4, N * 3 / 4]) { x.fillStyle = 'rgba(150,110,52,0.35)'; x.fillRect(sx - 1.5 * S, 0, 3 * S, N); }
+    return {
+      gloss: 0.18, nstr: 2.6,
+      post(col, H) {
+        for (let y = 0; y < N; y++) for (let xx = 0; xx < N; xx++) {
+          const i = xx + y * N, a = f1(xx / N, y / N), m = 0.82 + 0.34 * a + (Math.random() - 0.5) * 0.1;
+          col[i * 4] *= m; col[i * 4 + 1] *= m; col[i * 4 + 2] *= m;
+          H[i] += (Math.random() - 0.5) * 0.06;
+        }
+      },
+    };
+  }));
+  // 4: raised-panel walnut wainscot, 1.2 m wide, full height of the texture = the wainscot (top rail at the top)
+  L.push(placeLayer(N, 305, (x, hx, N, r) => {
+    const g1 = wnoise(64, 351), g2 = wnoise(8, 352), g3 = wnoise(256, 353);
+    const st = 0.075 * N / 1.2 * 1.2, rail = 0.1 * N, bev = 0.035 * N;
+    return {
+      gloss: 0.7, nstr: 3,
+      post(col, H, G) {
+        for (let y = 0; y < N; y++) for (let xx = 0; xx < N; xx++) {
+          const i = xx + y * N, px = xx % (N / 2);
+          // inside the raised field? distance into the panel from the frame
+          const dx = Math.min(px - st, N / 2 - st - px), dy = Math.min(y - rail, N - rail * 1.25 - y), d = Math.min(dx, dy);
+          const frame = d < 0;
+          const along = frame && dy < dx ? xx : y;   // rails run horizontally, stiles and the field vertically
+          const grain = frame && dy < dx ? g1(y / N * 2, xx / N * 40) * 0.6 + g2(y / N * 8, xx / N * 2) * 0.4 : g1(xx / N * 40, y / N * 2) * 0.6 + g2(xx / N * 2, y / N * 8) * 0.4;
+          const ring = Math.sin(grain * 40) * 0.5 + 0.5;
+          let m = 0.7 + 0.45 * grain + 0.12 * ring + (g3(xx / N * 256, y / N * 256) - 0.5) * 0.12;
+          let h = 0.5;
+          if (!frame) { h = d < bev ? 0.5 + 0.35 * d / bev : 0.85; if (d < bev) m *= 0.85; }
+          else { h = 0.5; if (d > -3 * S) m *= 0.7; }
+          col[i * 4] = 70 * m; col[i * 4 + 1] = 40 * m; col[i * 4 + 2] = 24 * m; col[i * 4 + 3] = 255;
+          H[i] = h + (ring - 0.5) * 0.015 + (along & 0) ; G[i] = 0.55 + 0.3 * ring;
+        }
+      },
+    };
+  }));
+  // 5: hotel corridor carpet, 1.2 m: wine ground, gold lattice, black lozenges, little rosettes; heathered pile
+  L.push(placeLayer(N, 306, (x, hx, N, r) => {
+    x.fillStyle = '#6c1418'; x.fillRect(0, 0, N, N);
+    const q = N / 4;
+    for (let j = -1; j <= 4; j++) for (let i = -1; i <= 4; i++) {
+      const cx = i * q + (j & 1 ? q / 2 : 0), cy = j * q / 2 * 2 / 2 + j * q / 2;
+      // lozenge
+      x.fillStyle = '#1e0c0a'; x.beginPath(); x.moveTo(cx, cy - q * 0.32); x.lineTo(cx + q * 0.22, cy); x.lineTo(cx, cy + q * 0.32); x.lineTo(cx - q * 0.22, cy); x.closePath(); x.fill();
+      x.strokeStyle = '#b48a3a'; x.lineWidth = 5 * S; x.stroke();
+      x.fillStyle = '#c99a44'; x.beginPath(); x.arc(cx, cy, q * 0.05, 0, 6.3); x.fill();
+      for (let k = 0; k < 4; k++) { const a = k * Math.PI / 2; x.fillStyle = '#8e2a22'; x.beginPath(); x.ellipse(cx + Math.cos(a) * q * 0.1, cy + Math.sin(a) * q * 0.16, q * 0.035, q * 0.06, a, 0, 6.3); x.fill(); }
+    }
+    // lattice
+    x.strokeStyle = '#a07a34'; x.lineWidth = 4 * S;
+    for (let k = -8; k <= 8; k++) { x.beginPath(); x.moveTo(k * q / 2 * 1.0, 0); x.lineTo(k * q / 2 + N, N); x.stroke(); x.beginPath(); x.moveTo(k * q / 2 + N, 0); x.lineTo(k * q / 2, N); x.stroke(); }
+    const hz = wnoise(128, 361), bl = wnoise(16, 362);
+    return {
+      gloss: 0.04, nstr: 2.2,
+      post(col, H) {
+        const lp = Math.max(2, Math.round(3 * S));
+        for (let y = 0; y < N; y++) for (let xx = 0; xx < N; xx++) {
+          const i = xx + y * N, fx = (xx % lp) / lp - 0.5, fy = (y % lp) / lp - 0.5, dome = Math.max(0, 1 - (fx * fx + fy * fy) * 3);
+          const m = 0.72 + 0.3 * dome + (hz(xx / N * 128, y / N * 128) - 0.5) * 0.3 + (bl(xx / N * 16, y / N * 16) - 0.5) * 0.15 + (Math.random() - 0.5) * 0.18;
+          col[i * 4] *= m; col[i * 4 + 1] *= m; col[i * 4 + 2] *= m;
+          H[i] = 0.3 + 0.5 * dome + Math.random() * 0.15;
+        }
+      },
+    };
+  }));
+  // 6: hospital sheet vinyl, 2 m: pale chips in a green-grey ground, one welded seam, scuffs
+  L.push(placeLayer(N, 307, (x, hx, N, r) => {
+    x.fillStyle = '#c3c8bd'; x.fillRect(0, 0, N, N);
+    const chips = ['#9aa196', '#e1e3da', '#7f877d', '#b3b8a6', '#d4d0c0', '#8b9488'];
+    for (let i = 0; i < 60000 * S * S + 6000; i++) { x.fillStyle = chips[(r() * chips.length) | 0]; x.globalAlpha = 0.5 + r() * 0.5; const s = (1 + r() * 3.5) * S; x.fillRect(r() * N, r() * N, s, s * (0.5 + r())); }
+    x.globalAlpha = 1;
+    x.fillStyle = '#9fa69a'; x.fillRect(0, 0, 4 * S, N); hx.fillStyle = '#6a6a6a'; hx.fillRect(0, 0, 4 * S, N);
+    for (let i = 0; i < 40; i++) { let px = r() * N, py = r() * N, a = r() * 6.3; x.strokeStyle = `rgba(20,20,20,${0.08 + r() * 0.12})`; x.lineWidth = (2 + r() * 4) * S; x.lineCap = 'round'; x.beginPath(); x.moveTo(px, py); for (let k = 0; k < 6; k++) { a += (r() - 0.5) * 0.6; px += Math.cos(a) * 12 * S; py += Math.sin(a) * 12 * S; x.lineTo(px, py); } x.stroke(); }
+    const f1 = fbmT(371, 4, 4);
+    return { gloss: 0.9, nstr: 0.8, post(col, H, G) { for (let i = 0; i < N * N; i++) { const a = f1((i % N) / N, ((i / N) | 0) / N), m = 0.92 + 0.14 * a; col[i * 4] *= m; col[i * 4 + 1] *= m; col[i * 4 + 2] *= m; G[i] = 0.55 + 0.45 * a; H[i] += (Math.random() - 0.5) * 0.02; } } };
+  }));
+  // 7: painted concrete block, 1.2 m: 400 x 200 running bond, tooled joints, eggshell paint over pitted block
+  L.push(placeLayer(N, 308, (x, hx, N, r) => {
+    const bw = N / 3, bh = N / 6, j = Math.max(2, 5 * S);
+    x.fillStyle = '#d6d8cc'; x.fillRect(0, 0, N, N);
+    for (let row = 0; row < 6; row++) {
+      const off = row & 1 ? bw / 2 : 0;
+      x.fillStyle = 'rgba(120,124,112,0.7)'; x.fillRect(0, row * bh, N, j);
+      hx.fillStyle = '#404040'; hx.fillRect(0, row * bh, N, j);
+      for (let k = -1; k < 4; k++) { const px = k * bw + off; x.fillRect(px, row * bh, j, bh); hx.fillRect(px, row * bh, j, bh); }
+    }
+    for (let i = 0; i < 20000 * S * S + 3000; i++) { const px = r() * N, py = r() * N, s = (0.6 + r() * 2.2) * S; hx.fillStyle = '#585858'; hx.beginPath(); hx.arc(px, py, s, 0, 6.3); hx.fill(); x.fillStyle = 'rgba(150,152,140,0.35)'; x.beginPath(); x.arc(px, py, s, 0, 6.3); x.fill(); }
+    const f1 = fbmT(381, 4, 4);
+    return { gloss: 0.35, nstr: 2.4, post(col, H) { for (let i = 0; i < N * N; i++) { const a = f1((i % N) / N, ((i / N) | 0) / N), m = 0.93 + 0.1 * a + (Math.random() - 0.5) * 0.04; col[i * 4] *= m; col[i * 4 + 1] *= m; col[i * 4 + 2] *= m; } } };
+  }));
+  // 8: board-formed concrete soffit, 2.4 m: 150 mm planks along u with grain printed into the concrete
+  L.push(placeLayer(N, 309, (x, hx, N, r) => {
+    const pw = N / 16, g1 = wnoise(256, 391), g2 = wnoise(16, 392), f1 = fbmT(393, 4, 4);
+    const tone = []; for (let k = 0; k < 16; k++) tone.push(0.85 + r() * 0.3);
+    return {
+      gloss: 0.08, nstr: 2.6,
+      post(col, H) {
+        for (let y = 0; y < N; y++) for (let xx = 0; xx < N; xx++) {
+          const i = xx + y * N, k = Math.floor(y / pw), fy = (y % pw) / pw;
+          const gr = g1(xx / N * 8, y / N * 256 + k * 3.1) * 0.6 + g2(xx / N * 2, y / N * 16 + k) * 0.4;
+          const seam = Math.min(fy, 1 - fy) * pw < 1.6 * S ? 1 : 0;
+          const m = (0.72 + 0.3 * f1(xx / N, y / N)) * tone[k] * (1 - 0.35 * seam) + (gr - 0.5) * 0.1 + (Math.random() - 0.5) * 0.05;
+          col[i * 4] = 128 * m; col[i * 4 + 1] = 125 * m; col[i * 4 + 2] = 118 * m; col[i * 4 + 3] = 255;
+          H[i] = 0.5 + (gr - 0.5) * 0.3 + seam * 0.25;
+        }
+      },
+    };
+  }));
+  // 9: old stippled plaster ceiling, 1.2 m, nicotine-yellowed
+  L.push(placeLayer(N, 310, (x, hx, N, r) => {
+    const f1 = fbmT(401, 4, 4), s1 = wnoise(128, 402), s2 = wnoise(256, 403);
+    return {
+      gloss: 0.1, nstr: 2.2,
+      post(col, H) {
+        for (let y = 0; y < N; y++) for (let xx = 0; xx < N; xx++) {
+          const i = xx + y * N, u = xx / N, v = y / N, st = s1(u * 128, v * 128) * 0.6 + s2(u * 256, v * 256) * 0.4, a = f1(u, v);
+          const m = 0.86 + 0.14 * a + (st - 0.5) * 0.12;
+          col[i * 4] = 214 * m; col[i * 4 + 1] = 204 * m; col[i * 4 + 2] = 182 * m; col[i * 4 + 3] = 255;
+          H[i] = st;
+        }
+      },
+    };
+  }));
+  // pack: albedo rgb + gloss, normal xyz + height
+  const n = L.length, A = new Uint8Array(N * N * 4 * n), Nn = new Uint8Array(N * N * 4 * n);
+  L.forEach((l, k) => {
+    const o = N * N * 4 * k, H = l.H, s = l.nstr;
+    for (let i = 0; i < N * N; i++) {
+      A[o + i * 4] = l.col[i * 4]; A[o + i * 4 + 1] = l.col[i * 4 + 1]; A[o + i * 4 + 2] = l.col[i * 4 + 2]; A[o + i * 4 + 3] = Math.max(0, Math.min(255, l.G[i] * 255));
+      const xx = i % N, y = (i / N) | 0;
+      const hx = (H[((xx + 1) % N) + y * N] - H[((xx + N - 1) % N) + y * N]) * s * N / 512, hy = (H[xx + ((y + 1) % N) * N] - H[xx + ((y + N - 1) % N) * N]) * s * N / 512;
+      const ln = 1 / Math.hypot(hx, hy, 1);
+      Nn[o + i * 4] = (-hx * ln * 0.5 + 0.5) * 255; Nn[o + i * 4 + 1] = (-hy * ln * 0.5 + 0.5) * 255; Nn[o + i * 4 + 2] = ln * 255; Nn[o + i * 4 + 3] = Math.max(0, Math.min(255, H[i] * 255));
+    }
+  });
+  const mk = (data, srgb) => {
+    const t = new THREE.DataArrayTexture(data, N, N, n);
+    t.format = THREE.RGBAFormat; t.type = THREE.UnsignedByteType;
+    t.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.magFilter = THREE.LinearFilter; t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.generateMipmaps = true; t.anisotropy = Math.min(aniso, 8); t.unpackAlignment = 1; t.needsUpdate = true;
+    return t;
+  };
+  return { alb: mk(A, true), nrm: mk(Nn, false) };
 }
 
 // ---------- object textures (props.js) ----------

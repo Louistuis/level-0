@@ -1,6 +1,6 @@
 // Renderer: HDR scene target, bloom chain, and the final visor / lens / grade pass.
 import * as THREE from './three.module.min.js';
-import { POST_VS, DOWN_FS, UP_FS, FINAL_FS } from './shaders.js';
+import { POST_VS, DOWN_FS, UP_FS, FINAL_FS, ATMOS, WARM } from './shaders.js';
 
 const QUAL = {
   low: { h: 540, q: 0, msaa: 0 },
@@ -30,6 +30,8 @@ export class Renderer {
       uSrcTexel: { value: new THREE.Vector2(1, 1) }, uSharpen: { value: 0 }, uPostQ: { value: 1 },
       uTime: { value: 0 }, uExposure: { value: 1.5 }, uGrain: { value: 1 }, uVisor: { value: 1 }, uBreath: { value: 0.1 },
       uCrack: { value: 0 }, uSanity: { value: 1 }, uDamage: { value: 0 }, uDead: { value: 0 }, uFade: { value: 1 }, uBlink: { value: 0 },
+      // grade per place, eased by mats.atmos (Level 0: 1.06 saturation, mono-yellow tint)
+      uGrade: ATMOS.uGrade, uSatK: ATMOS.uSatK,
     };
     this.mFinal = mk(FINAL_FS, this.fx);
     this.rts = null;
@@ -69,8 +71,28 @@ export class Renderer {
     this.fx.uPostQ.value = Q.q;
   }
   _pass(mat, target) { this.quad.material = mat; this.r.setRenderTarget(target); this.r.render(this.pscene, this.pcam); }
+  // compile the place shaders before they are needed (in the background where the browser can)
+  _warm(camera, scene) {
+    WARM.pending = false;
+    if (!this.warmScene) this.warmScene = new THREE.Scene();
+    const sc = this.warmScene; sc.clear();
+    const g = this.warmGeo || (this.warmGeo = new THREE.PlaneGeometry(0.01, 0.01));
+    for (const m of WARM.list) { const o = new THREE.Mesh(g, m); o.frustumCulled = false; sc.add(o); }
+    this.precompile(sc, camera, scene || null);
+  }
+  // Compile an object's shader programs in the background (where the browser can), so the frame that
+  // first draws it does not wait for the compiler. three.js keys a program by the target it is drawn
+  // into, so this has to happen with the HDR scene target bound or the result is never used.
+  precompile(obj, camera, scene) {
+    const r = this.r, prev = r.getRenderTarget();
+    let p = null;
+    try { r.setRenderTarget(this.rts.scene); p = r.compileAsync ? r.compileAsync(obj, camera, scene) : (r.compile(obj, camera, scene), null); } catch (e) { p = null; /* compiled on first use instead */ }
+    try { r.setRenderTarget(prev); } catch (e) { /* keep going */ }
+    return p && p.then ? p.catch(() => {}) : Promise.resolve();
+  }
   render(scene, camera) {
     const { r, rts } = this;
+    if (WARM.pending && WARM.list.length) this._warm(camera, scene);
     r.setRenderTarget(rts.scene); r.render(scene, camera);
     const D = this.mDown.uniforms, U = this.mUp.uniforms;
     let src = rts.scene;

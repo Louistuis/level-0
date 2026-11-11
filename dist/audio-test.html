@@ -20,7 +20,8 @@
 <p><label>dead</label><input type="checkbox" id="dead"> <label>paused</label><input type="checkbox" id="paused"></p>
 <div id="shots"></div>
 <p>
-  <button data-ent="longarm">longarm</button><button data-ent="hollow">hollow</button><button data-ent="biter">biter</button>
+  <button data-ent="longarm">longarm</button><button data-ent="hollow">hollow</button><button data-ent="smiler">smiler</button>
+  <button data-ent="stealer">stealer</button><button data-ent="hound">hound</button><button data-ent="faceling">faceling</button><button data-ent="horde">horde</button>
   <button id="noent">remove entities</button>
 </p>
 <p id="voices"></p>
@@ -29,9 +30,10 @@
 import { AudioEngine } from './js/audio.js';
 const A = new AudioEngine();
 window.A = A;
-const st = { hum: 0.7, room: 0.4, exertion: 0, fear: 0, sanity: 1, dark: 0, blackout: 0, dead: false, chase: 0 };
+const st = { hum: 0.7, room: 0.4, exertion: 0, fear: 0, sanity: 1, dark: 0, blackout: 0, dead: false, chase: 0, tension: 0, run: 0, water: 0, reveal: 0, place: 'level0' };
 const sl = document.getElementById('sliders');
-for (const k of ['hum', 'room', 'exertion', 'fear', 'sanity', 'dark', 'blackout', 'chase']) {
+{ const p = document.createElement('p'); p.innerHTML = '<label>place</label><select>' + ['level0', 'level1', 'level2', 'level5', 'level37', 'levelrun'].map((k) => `<option>${k}</option>`).join('') + '</select>'; p.querySelector('select').onchange = (e) => { st.place = e.target.value; }; sl.appendChild(p); }
+for (const k of ['hum', 'room', 'exertion', 'fear', 'sanity', 'dark', 'blackout', 'chase', 'tension', 'run', 'water', 'reveal']) {
   const p = document.createElement('p');
   p.innerHTML = `<label>${k}</label><input type="range" min="0" max="1" step="0.01" value="${st[k]}">`;
   p.querySelector('input').oninput = (e) => { st[k] = +e.target.value; };
@@ -40,16 +42,21 @@ for (const k of ['hum', 'room', 'exertion', 'fear', 'sanity', 'dark', 'blackout'
 document.getElementById('dead').onchange = (e) => { st.dead = e.target.checked; };
 document.getElementById('paused').onchange = (e) => A.setPaused(e.target.checked);
 const names = ['flashOn', 'flashOff', 'pickup', 'drink', 'battery', 'discover', 'artifact', 'sign', 'hit', 'death', 'respawn', 'exit',
-  'uiHover', 'uiClick', 'uiBack', 'stinger', 'apparition', 'knock', 'doorSlam', 'geiger', 'radio'];
+  'uiHover', 'uiClick', 'uiBack', 'stinger', 'apparition', 'knock', 'doorSlam', 'geiger', 'radio',
+  'stealerCall', 'stealerTurn', 'houndBark', 'houndRush', 'smilerSeen', 'facelingSeen', 'facelingGone', 'lunge', 'scare', 'behind',
+  'doorCreak', 'splash', 'steamHiss', 'lampPop', 'farRun', 'placeFound', 'alarmStart', 'hordeNear', 'blackoutStart', 'blackoutEnd', 'almond'];
 const shots = document.getElementById('shots');
 for (const n of names) {
   const b = document.createElement('button');
   b.textContent = n;
-  b.onclick = () => A.play(n, (n === 'knock' || n === 'doorSlam') ? { pos: [Math.random() * 20 - 10, 1.5, -8] } : {});
+  b.onclick = () => A.play(n, ['knock', 'doorSlam', 'houndBark', 'stealerCall', 'farRun', 'doorCreak', 'steamHiss', 'lampPop', 'hordeNear', 'houndRush', 'stealerTurn', 'lunge'].includes(n) ? { pos: [Math.random() * 20 - 10, 1.5, -8] } : {});
   shots.appendChild(b);
 }
 for (const k of ['carpet', 'stair', 'crouch', 'land']) {
   const b = document.createElement('button'); b.textContent = 'step ' + k; b.onclick = () => A.footstep(k, 0.6); shots.appendChild(b);
+}
+for (const k of ['carpet', 'rug', 'tile', 'concrete', 'metal', 'water']) {
+  const b = document.createElement('button'); b.textContent = 'surface ' + k; b.onclick = () => A.footstep('carpet', 0.6, k); shots.appendChild(b);
 }
 const lb = document.createElement('button'); lb.textContent = 'lampTick'; lb.onclick = () => A.lampTick(3, 2.8, -2, 0.8); shots.appendChild(lb);
 const vo = document.getElementById('voices');
@@ -72,7 +79,7 @@ function frame(now) {
   let i = 0;
   for (const e of ents) {
     const a = ang + i++ * 2;
-    A.entity(e, e, Math.cos(a) * 6, 1.6, Math.sin(a) * 6, { chase: st.chase, moving: 1, near: st.fear, vol: 1 });
+    A.entity(e, e, Math.cos(a) * 6, 1.6, Math.sin(a) * 6, { chase: st.chase, moving: 1, reveal: st.reveal, vol: 1 });
   }
   requestAnimationFrame(frame);
 }

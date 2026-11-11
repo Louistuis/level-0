@@ -8,10 +8,11 @@
 import * as THREE from './three.module.min.js';
 import { S, SEC, ARTIFACTS, hash3, mulberry32 } from './util.js';
 import { labelTexture, objectDetailTexture, propAtlas, atlasUV } from './textures.js';
+import { buildDecor } from './decor.js';
 
 const V3 = THREE.Vector3;
 const cache = new Map();
-const geo = (k, f) => { let g = cache.get(k); if (!g) { g = f(); cache.set(k, g); } return g; };
+export const geo = (k, f) => { let g = cache.get(k); if (!g) { g = f(); cache.set(k, g); } return g; };
 export const box = (w, h, d) => geo(`b${w},${h},${d}`, () => new THREE.BoxGeometry(w, h, d));
 export const cyl = (r, h, r2 = r, seg = 12) => geo(`c${r},${h},${r2},${seg}`, () => new THREE.CylinderGeometry(r2, r, h, seg));
 export const sph = (r, seg = 14) => geo(`s${r},${seg}`, () => new THREE.SphereGeometry(r, seg, Math.max(6, seg - 4)));
@@ -22,9 +23,9 @@ const plane = () => geo('pl', () => new THREE.PlaneGeometry(1, 1));
 // small math + noise
 // ======================================================================
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
-const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
-const mix = (a, b, t) => a + (b - a) * t;
-const gauss = (x, w) => Math.exp(-(x * x) / (w * w));
+export const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+export const mix = (a, b, t) => a + (b - a) * t;
+export const gauss =(x, w) => Math.exp(-(x * x) / (w * w));
 function h3(x, y, z) { let h = Math.imul(x | 0, 374761393) + Math.imul(y | 0, 668265263) + Math.imul(z | 0, 1274126177); h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; }
 function vn3(x, y, z) {
   const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
@@ -33,18 +34,18 @@ function vn3(x, y, z) {
   return L(L(L(h3(xi, yi, zi), h3(xi + 1, yi, zi), fx), L(h3(xi, yi + 1, zi), h3(xi + 1, yi + 1, zi), fx), fy),
     L(L(h3(xi, yi, zi + 1), h3(xi + 1, yi, zi + 1), fx), L(h3(xi, yi + 1, zi + 1), h3(xi + 1, yi + 1, zi + 1), fx), fy), fz);
 }
-const fbm3 = (x, y, z) => vn3(x, y, z) * 0.55 + vn3(x * 2.1 + 7, y * 2.1, z * 2.1) * 0.3 + vn3(x * 4.3, y * 4.3 + 3, z * 4.3) * 0.15;
-function mrand(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+export const fbm3 = (x, y, z) => vn3(x, y, z) * 0.55 + vn3(x * 2.1 + 7, y * 2.1, z * 2.1) * 0.3 + vn3(x * 4.3, y * 4.3 + 3, z * 4.3) * 0.15;
+export function mrand(seed) { let a = seed >>> 0; return () => { a = (a + 0x6d2b79f5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
 
 const _q = new THREE.Quaternion(), _e = new THREE.Euler();
 // transform matrix: position, euler rotation (XYZ), scale
-function T(x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0, sx = 1, sy = sx, sz = sx) {
+export function T(x = 0, y = 0, z = 0, rx = 0, ry = 0, rz = 0, sx = 1, sy = sx, sz = sx) {
   return new THREE.Matrix4().compose(new V3(x, y, z), _q.setFromEuler(_e.set(rx, ry, rz)).clone(), new V3(sx, sy, sz));
 }
 // rotation about a pivot point
 function about(c, rx, ry, rz) { return new THREE.Matrix4().makeTranslation(c[0], c[1], c[2]).multiply(T(0, 0, 0, rx, ry, rz)).multiply(new THREE.Matrix4().makeTranslation(-c[0], -c[1], -c[2])); }
 // transform that points local +Y along dir
-function TY(x, y, z, dir, sx = 1, sy = sx, sz = sx, spin = 0) {
+export function TY(x, y, z, dir, sx = 1, sy = sx, sz = sx, spin = 0) {
   const d = new V3(...dir).normalize();
   const q = new THREE.Quaternion().setFromUnitVectors(new V3(0, 1, 0), d);
   if (spin) q.multiply(new THREE.Quaternion().setFromAxisAngle(new V3(0, 1, 0), spin));
@@ -73,7 +74,7 @@ function finish(P, I, uv) {
 // Swept tube along a smooth curve through ctrl points. rf(t, a) gives the radius at
 // t (0..1 along) and a (angle; a = 0 points along `up`, a = PI/2 is up x tangent).
 // disp(p, t, a, dir) may push the vertex. Ends are closed with a domed pole.
-function tube(ctrl, rf, o = {}) {
+export function tube(ctrl, rf, o = {}) {
   const n = o.n || 16, seg = o.seg || 10;
   const curve = ctrl.length > 2 ? new THREE.CatmullRomCurve3(ctrl.map((p) => new V3(...p)), false, 'centripetal') : new THREE.LineCurve3(new V3(...ctrl[0]), new V3(...ctrl[1]));
   const pts = curve.getSpacedPoints(n - 1);
@@ -109,9 +110,9 @@ function tube(ctrl, rf, o = {}) {
   return finish(P, I);
 }
 // ellipse / superellipse radius in a tube's frame: a = 0 is "front" (rz), PI/2 is side (rx)
-function sell(a, rx, rz, e = 2) { const c = Math.abs(Math.cos(a)) / rz, s = Math.abs(Math.sin(a)) / rx; return Math.pow(Math.pow(c, e) + Math.pow(s, e), -1 / e); }
+export function sell(a, rx, rz, e = 2) { const c = Math.abs(Math.cos(a)) / rz, s = Math.abs(Math.sin(a)) / rx; return Math.pow(Math.pow(c, e) + Math.pow(s, e), -1 / e); }
 // piecewise-smooth interpolation through [t, v] keys
-function keys(K) {
+export function keys(K) {
   return (t) => {
     if (t <= K[0][0]) return K[0][1];
     for (let i = 1; i < K.length; i++) if (t <= K[i][0]) { const u = (t - K[i - 1][0]) / (K[i][0] - K[i - 1][0]); const s = u * u * (3 - 2 * u); return K[i - 1][1] + (K[i][1] - K[i - 1][1]) * s; }
@@ -120,7 +121,7 @@ function keys(K) {
 }
 
 // Deformed sphere. fn(p) receives the unit direction in p and moves it into place.
-function blob(su, sv, fn) {
+export function blob(su, sv, fn) {
   const P = [], I = [], p = new V3();
   const push = () => { fn(p); P.push(p.x, p.y, p.z); };
   p.set(0, 1, 0); push();
@@ -141,7 +142,7 @@ function blob(su, sv, fn) {
 }
 
 // Rounded box (same trick as three's RoundedBoxGeometry).
-function rbox(w, h, d, r, s = 2) {
+export function rbox(w, h, d, r, s = 2) {
   const seg = s * 2 + 1, g = new THREE.BoxGeometry(1, 1, 1, seg, seg, seg);
   const pos = g.attributes.position, nor = g.attributes.normal, half = 0.5 / seg, bx = new V3(w / 2 - r, h / 2 - r, d / 2 - r), p = new V3(), n = new V3();
   for (let i = 0; i < pos.count; i++) {
@@ -156,7 +157,7 @@ function rbox(w, h, d, r, s = 2) {
 // Lathe around +Y with analytic normals and a duplicated seam (so printed labels wrap).
 // prof: list of runs; each run is a list of [r, y]. Runs meet at hard edges.
 // Order each run bottom-centre -> out -> up -> top-centre for outward faces.
-function lathe(prof, seg = 24, o = {}) {
+export function lathe(prof, seg = 24, o = {}) {
   const P = [], N = [], UV = [], I = [];
   const runs = typeof prof[0][0] === 'number' ? [prof] : prof;
   const y0 = o.y0 ?? Math.min(...runs.flat().map((q) => q[1])), y1 = o.y1 ?? Math.max(...runs.flat().map((q) => q[1]));
@@ -208,10 +209,10 @@ function extrude(pts, depth, bevel = 0.002, curve = 6) {
 // Kit: merges parts with surface attributes and (optionally) skin weights
 // ======================================================================
 const _col = new THREE.Color();
-const lin = (hex) => { _col.set(hex); return [_col.r, _col.g, _col.b]; };
+export const lin = (hex) => { _col.set(hex); return [_col.r, _col.g, _col.b]; };
 let WHITE_UV = null;
 
-class Kit {
+export class Kit {
   constructor(bones) {
     this.P = []; this.N = []; this.U = []; this.C = []; this.S = []; this.I = [];
     this.bones = bones || null; this.SI = []; this.SW = [];
@@ -278,10 +279,10 @@ class Kit {
 }
 
 // skeleton spec: [name, parent, head [x,y,z], tail [x,y,z], influence radius scale]
-function boneSpec(list) {
+export function boneSpec(list) {
   return list.map(([name, parent, a, b, r]) => ({ name, parent, a: new V3(...a), b: new V3(...b), r: r || 1, _a: new V3(...a), _ab: new V3(...b).sub(new V3(...a)) }));
 }
-function skinned(geom, spec, mat, sphere) {
+export function skinned(geom, spec, mat, sphere) {
   const bones = [], by = {};
   for (const s of spec) {
     const b = new THREE.Bone(); b.name = s.name; by[s.name] = b; bones.push(b);
@@ -295,7 +296,7 @@ function skinned(geom, spec, mat, sphere) {
   for (const b of bones) b.userData.rest = b.position.clone();
   return { mesh, by };
 }
-const meshOf = (g, mat) => { const m = new THREE.Mesh(g, mat); return m; };
+export const meshOf = (g, mat) => { const m = new THREE.Mesh(g, mat); return m; };
 
 // ======================================================================
 // materials
@@ -323,7 +324,7 @@ export function makeMats(mats, tex) {
 // ======================================================================
 // Hazmat suit: other players, and the Hollow (the same suit with nobody in it)
 // ======================================================================
-const SUIT_B = boneSpec([
+export const SUIT_B = boneSpec([
   ['hips', null, [0, 0.95, 0], [0, 1.1, 0], 1.25],
   ['spine', 'hips', [0, 1.1, 0], [0, 1.27, 0], 1.25],
   ['chest', 'spine', [0, 1.27, 0], [0, 1.44, 0], 1.25],
@@ -559,7 +560,7 @@ export function makeSuit(M, hollow) {
   return g;
 }
 
-function legIK(th, sh, ft, hz, hy, tz, ty, L1, L2, pitch) {
+export function legIK(th, sh, ft, hz, hy, tz, ty, L1, L2, pitch) {
   const f = -(tz - hz), d = hy - ty;
   const D = clamp(Math.hypot(f, d), 0.08, L1 + L2 - 0.003);
   const k = Math.acos(clamp((L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2), -1, 1));
@@ -568,7 +569,7 @@ function legIK(th, sh, ft, hz, hy, tz, ty, L1, L2, pitch) {
   ft.rotation.x = -(th.rotation.x + sh.rotation.x) + pitch;
 }
 // damped spring on slot i (value i, velocity i+1)
-function spring(sp, i, target, k, c, dt) { sp[i + 1] += (k * (target - sp[i]) - c * sp[i + 1]) * dt; sp[i] += sp[i + 1] * dt; return sp[i]; }
+export function spring(sp, i, target, k, c, dt) { sp[i + 1] += (k * (target - sp[i]) - c * sp[i + 1]) * dt; sp[i] += sp[i + 1] * dt; return sp[i]; }
 
 export function animSuit(g, dt, speed, crouch, pitch) {
   if (g.userData.pk) { animPack(g, dt, speed, crouch, pitch); return; }
@@ -843,7 +844,7 @@ export function makeLongarm(M) {
 }
 
 // general 2-bone IK in the sagittal plane for bones whose rest pose is not vertical
-function ik2(th, sh, hz, hy, tz, ty, L1, L2, r1, r2, bendBack) {
+export function ik2(th, sh, hz, hy, tz, ty, L1, L2, r1, r2, bendBack) {
   const f = -(tz - hz), d = hy - ty;
   const D = clamp(Math.hypot(f, d), 0.08, L1 + L2 - 0.004);
   const k = Math.acos(clamp((L1 * L1 + L2 * L2 - D * D) / (2 * L1 * L2), -1, 1));
@@ -1275,6 +1276,9 @@ export class SectorProps {
     this.items = []; this.lateMarks = [];
     const d = s.data, ox = d.sx * SEC, oz = d.sz * SEC;
     const wp = (x, z) => [(ox + x + 0.5) * S, (oz + z + 0.5) * S];
+    // dressing of the other places (decor.js): merged meshes, no collision
+    this.decor = d.decor && d.decor.length ? buildDecor(M, d) : null;
+    if (this.decor) this.group.add(this.decor);
     for (const it of d.items) {
       if (taken(it.id)) continue;
       const m = it.kind === 'water' ? makeBottle(M) : makeBattery(M);
@@ -1319,7 +1323,7 @@ export class SectorProps {
     }
   }
   remove(item) { this.group.remove(item.obj); this.items.splice(this.items.indexOf(item), 1); }
-  dispose(scene) { scene.remove(this.group); }
+  dispose(scene) { scene.remove(this.group); if (this.decor) this.decor.traverse((o) => { if (o.geometry) o.geometry.dispose(); }); }
   _clutter(plan) {
     for (const c of plan) {
       const key = c.kind === 'window' ? 'window' : c.kind;

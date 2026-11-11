@@ -45,7 +45,20 @@ function okRate(c, key, perSec) {
 function cleanState(s) {
   if (!s || typeof s !== 'object' || !num(s.x, -1e7, 1e7) || !num(s.z, -1e7, 1e7) || !num(s.y, -100, 100)) return null;
   const o = { x: s.x, y: s.y, z: s.z, w: num(s.w, -1e4, 1e4) ? s.w : 0, p: num(s.p, -2, 2) ? s.p : 0, f: s.f ? 1 : 0, c: s.c ? 1 : 0, a: s.a === 0 ? 0 : 1, n: num(s.n, 0, 1) ? s.n : 0, v: s.v ? 1 : 0 };
-  if (Array.isArray(s.e)) o.e = s.e.slice(0, 4).filter((e) => Array.isArray(e) && e.length === 7 && typeof e[0] === 'string' && e[0].length < 40 && /^[LHB]$/.test(e[1]) && num(e[2], -1e7, 1e7) && num(e[3], -100, 100) && num(e[4], -1e7, 1e7) && num(e[5], -1e4, 1e4) && typeof e[6] === 'string' && e[6].length < 8);
+  if (Array.isArray(s.e)) o.e = s.e.slice(0, 8).map(cleanEnt).filter(Boolean);
+  return o;
+}
+// A creature another client is simulating: [id, type, x, y, z, yaw, state, k, alias, reveal, run, v].
+// The first seven are required; the rest depend on the type (see Entities.serialize in the client).
+function cleanEnt(e) {
+  if (!Array.isArray(e) || e.length < 7 || e.length > 12 || typeof e[0] !== 'string' || e[0].length >= 40 || typeof e[1] !== 'string' || !/^[LHBMKWR]$/.test(e[1])) return null;
+  if (!num(e[2], -1e7, 1e7) || !num(e[3], -100, 100) || !num(e[4], -1e7, 1e7) || !num(e[5], -1e4, 1e4) || typeof e[6] !== 'string' || e[6].length > 16) return null;
+  const o = e.slice(0, 7);
+  if (e.length > 7) o.push(num(e[7], -1e6, 1e6) ? e[7] : 0);
+  if (e.length > 8) o.push(typeof e[8] === 'string' ? e[8].replace(/[^\w \-]/g, '').slice(0, 16) : null);
+  if (e.length > 9) o.push(e[9] ? 1 : 0);
+  if (e.length > 10) o.push(Array.isArray(e[10]) && e[10].length === 4 && e[10].every((v) => Number.isInteger(v) && Math.abs(v) < 2e7) ? e[10] : null);
+  if (e.length > 11) o.push(num(e[11], 0, 50) ? e[11] : 0);
   return o;
 }
 

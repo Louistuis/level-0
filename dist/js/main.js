@@ -15,16 +15,29 @@ import { Voice } from './voice.js';
 import { createMap } from './map.js';
 import { createHandheld } from './handheld.js';
 import { CREDITS } from './assets.js';
+import { BIOME, BIOMES, biomeOf, ENTITIES, WATER_Y } from './biomes.js';
 import { S, SEC, SEC_M, MAPN, CEIL, ARTIFACTS, SIGNS, hash3, WORLD_SEED, clamp, damp, mod, sectorCode } from './util.js';
 
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const REPO = 'https://github.com/Louistuis/level-0';
 const DONATE = 'https://www.buymeacoffee.com/louis9987';
 const Q = new URLSearchParams(location.search);
 const edition = Q.get('edition') || ((window.WebsimSocket || /websim/.test(location.hostname)) ? 'websim' : 'lou15');
 const ATTRACT = 1000; // the menu backdrop lives in a sector nobody can walk to
 
-const ui = createUI({ version: VERSION, edition, repoUrl: REPO, donateUrl: DONATE, artifacts: ARTIFACTS, signs: SIGNS, credits: CREDITS });
+// What the Catalog says about each entity once you have met it (the rule that keeps you alive).
+const FIELD_NOTES = {
+  L: 'Tall, and it hunts by sound before it hunts by sight. Walk, crouch, break its line of sight and stay quiet.',
+  H: 'An empty suit. It only moves when nobody is looking at it. Keep it in view while you leave.',
+  B: 'Teeth and eyes in the dark. Light and running draw it. Hold its gaze and back away slowly.',
+  M: 'It wears a wanderer\'s suit and a name, and it will wave you over. Look twice before you walk up to a friend.',
+  K: 'On all fours, and fast. It chases what runs. Face it, stand your ground, back off slowly.',
+  W: 'Someone with no face at the end of the hall. Leave it alone and keep your lamp off it.',
+  R: 'Level ! only. It does not stop. Neither should you.',
+};
+const ui = createUI({ version: VERSION, edition, repoUrl: REPO, donateUrl: DONATE, artifacts: ARTIFACTS, signs: SIGNS, credits: CREDITS,
+  places: BIOMES.map((b) => ({ id: b.id, level: b.level, name: b.name, blurb: b.blurb })),
+  entities: Object.keys(ENTITIES).map((code) => ({ code, name: ENTITIES[code].name, note: FIELD_NOTES[code] || '' })) });
 const set = ui.settings;
 const canvas = document.getElementById('view');
 const R = new Renderer(canvas);
@@ -36,7 +49,7 @@ const cam = new THREE.PerspectiveCamera(set.fov || 78, 1.6, 0.05, 90);
 const G = {
   state: 'title', alive: true, safe: true, t: 0, frame: 0,
   health: 1, sanity: 1, battery: 1, flashK: 0, hurtT: 99, dmg: 0, dead: 0, fade: 1, blink: 0, exposure: 1.5,
-  arts: [], taken: {}, visited: {}, stats: { sectors: 0, escapes: 0, deaths: 0, far: 0 }, playT: 0,
+  arts: [], taken: {}, visited: {}, places: [0], met: [], place: 0, placeT: 0, water: 0, names: [], namesT: 0, stats: { sectors: 0, escapes: 0, deaths: 0, far: 0 }, playT: 0,
   secKey: '', wheel: false, talk: false, room: 0.5, net: null, voice: null, target: null, lamps: new Map(), hudT: 0, slowT: 0, saveT: 0,
   hurt(a, cause, sx, sz, quiet) {
     if (!G.alive || G.state !== 'play') return;
@@ -66,7 +79,7 @@ world.material = mats.world;
 const M = makeMats(mats, tex);
 const U = mats.shared;
 const pl = new Player(world, cam);
-const ents = new Entities({ scene, world, M, tex, audio, shared: U });
+const ents = new Entities({ scene, world, M, tex, audio, shared: U, precompile: (o) => R.precompile(o, cam, scene) });
 const anom = new Anomalies({ scene, world, M, tex, audio, ents });
 const signs = new Signs(scene, M);
 const SIGN_IDS = SIGNS.map((s) => s.id);
@@ -93,7 +106,7 @@ function loadSave() { return LS.get(saveKey(), null); }
 function writeSave(keepPos = true) {
   if (!net) return;
   try { LS.set('level0.mapcache', [...net.claims].slice(-3000).map(([k, c]) => [k, c.seed, c.by, c.mine ? 1 : 0])); } catch (e) { /* storage full */ }
-  LS.set(saveKey(), { v: 1, pos: keepPos && G.alive ? [pl.x, pl.y, pl.z, pl.yaw] : null, health: G.health, sanity: G.sanity, battery: G.battery, arts: G.arts, taken: G.taken, visited: G.visited, stats: G.stats, playT: G.playT });
+  LS.set(saveKey(), { v: 1, pos: keepPos && G.alive ? [pl.x, pl.y, pl.z, pl.yaw] : null, health: G.health, sanity: G.sanity, battery: G.battery, arts: G.arts, taken: G.taken, visited: G.visited, places: G.places, met: G.met, stats: G.stats, playT: G.playT });
 }
 
 // ---------- input ----------
@@ -158,12 +171,18 @@ const map = createMap({
 });
 ui.on('map', () => map.toggle());
 // The handheld unit: radar and a scrap of the map, readable while walking. R, or the touch button.
-const nearby = () => (net ? [...net.peers().values()].filter((p) => p.s && p.s.a).map((p) => ({ x: p.s.x, z: p.s.z, name: p.username })) : []);
+const things = () => [...ents.mine, ...ents.remote.values()];
+const disguised = (m) => m.type === 'M' && m.alias && !m.reveal;
+const nearby = () => {
+  const out = net ? [...net.peers().values()].filter((p) => p.s && p.s.a).map((p) => ({ x: p.s.x, z: p.s.z, name: p.username })) : [];
+  for (const m of things()) if (disguised(m)) out.push({ x: m.x, z: m.z, name: m.alias });
+  return out;
+};
 const hand = createHandheld({
   map, hint: 'R', isTouch: () => ui.touch.enabled,
   getPlayer: () => (G.state === 'play' ? { x: pl.x, z: pl.z, yaw: pl.yaw } : null),
   getPeers: nearby,
-  getThings: () => [...ents.mine, ...ents.remote.values()],
+  getThings: () => things().filter((m) => !disguised(m)),
   sound: (n, o) => { if (audio.ready) audio.play(n, o); },
 });
 // The menu has its own quiet ambience: wake the audio on the first touch of the title screen.
@@ -222,9 +241,9 @@ async function begin(name) {
   if (!net) { net = await connect({ edition, name }); hookNet(); }
   if (net.kind === 'offline' && edition !== 'websim') ui.toast({ title: 'NO LINK', sub: 'Server unreachable. You are alone in here.', kind: 'danger' });
   const sv = loadSave();
-  if (sv) { G.health = sv.health > 0 ? sv.health : 1; G.sanity = sv.sanity ?? 1; G.battery = sv.battery ?? 1; G.arts = sv.arts || []; G.taken = sv.taken || {}; G.visited = sv.visited || {}; G.stats = { sectors: 0, escapes: 0, deaths: 0, far: 0, ...(sv.stats || {}) }; G.playT = sv.playT || 0; }
+  if (sv) { G.health = sv.health > 0 ? sv.health : 1; G.sanity = sv.sanity ?? 1; G.battery = sv.battery ?? 1; G.arts = sv.arts || []; G.taken = sv.taken || {}; G.visited = sv.visited || {}; G.places = Array.isArray(sv.places) && sv.places.length ? sv.places : [0]; G.met = Array.isArray(sv.met) ? sv.met : []; G.stats = { sectors: 0, escapes: 0, deaths: 0, far: 0, ...(sv.stats || {}) }; G.playT = sv.playT || 0; }
   const cut = Date.now() - 30 * 60000; for (const k in G.taken) if (G.taken[k] < cut) delete G.taken[k];
-  ui.setCatalog(G.arts.map((k) => ARTIFACTS[k].id));
+  ui.setCatalog(G.arts.map((k) => ARTIFACTS[k].id)); ui.setJournal({ places: G.places, entities: G.met });
   world.reset();
   G.spawnAt = sv && sv.pos ? sv.pos : null;
   const sp = G.spawnAt || [14.7, 0, 14.7, 0];
@@ -251,6 +270,7 @@ function die(cause) { if (map.isOpen) map.close();
 }
 function respawn() {
   ui.hideOverlays(); ents.clear(); anom.clear();
+  G.place = 0; G.placeT = 0;
   G.health = 1; G.sanity = 1; G.battery = Math.max(G.battery, 0.6); G.dmg = 0; G.escaping = 0; G.fade = 1; G.dead = 0; pl.frozen = false; G.wheel = false;
   world.reset(); G.spawnAt = null; pl.place(14.7, 0, 14.7, Math.random() * 6.28); G.state = 'loading'; G.loadT = 0;
 }
@@ -331,6 +351,34 @@ function refreshLists() {
   for (const [, r] of ents.players) rows.push({ username: r.name || 'someone', distance: Math.round(r.d || 0) });
   rows.sort((a, b) => a.distance - b.distance); ui.setPlayers(rows);
 }
+// First time in another level: say where this is, once, and keep it in the Catalog.
+function enterPlace(id) {
+  if (!id || G.places.includes(id)) return;
+  const b = biomeOf(id);
+  G.places.push(id); ui.setJournal({ places: G.places, entities: G.met });
+  audio.play('placeFound'); ui.toast({ title: (b.level + ' · ' + b.name).toUpperCase(), sub: b.blurb, kind: 'discover' });
+  setTimeout(() => ui.subtitle('This is not Level 0 any more.', 4500), 1500);
+  writeSave();
+}
+// An entity is "met" once it has been close and in plain sight (the Skin-Stealer only once it has turned).
+function noteEntities() {
+  G.namesT -= 0.1;
+  if (G.namesT <= 0 && net) {
+    G.namesT = 5;
+    const n = new Set();
+    for (const p of net.peers().values()) if (p.username) n.add(p.username);
+    for (const r of net.board || []) if (r && r.username) n.add(r.username);
+    let k = 0; for (const c of net.claims.values()) { if (c.by) n.add(c.by); if (++k > 400) break; }
+    n.delete(net.username); G.names = [...n].slice(0, 40);
+  }
+  for (const m of things()) {
+    if (!ENTITIES[m.type] || G.met.includes(m.type) || disguised(m)) continue;
+    if (Math.hypot(m.x - pl.x, m.z - pl.z) < 14 && world.los(pl.x, pl.z, m.x, m.z)) {
+      G.met.push(m.type); ui.setJournal({ places: G.places, entities: G.met });
+      ui.toast({ title: 'FIELD NOTE ADDED', sub: ENTITIES[m.type].name + '. See the Catalog.', kind: 'info' });
+    }
+  }
+}
 function enterSector(sx, sz) {
   const s = world.sec(sx, sz); if (!s || !s.data) return false;
   const k = sx + ',' + sz, c = net.claim(sx, sz);
@@ -367,6 +415,12 @@ function step(dt) {
   pl.shake = damp(pl.shake, (1 - G.sanity) * 0.25 * (playing ? 1 : 0), 4, dt);
   pl.update(dt, inp, set);
   const missing = world.update(pl.x, pl.z);
+  // which level the player stands in, and how deep the water is there
+  const bio = world.bioAt ? world.bioAt(pl.x, pl.z) | 0 : 0;
+  // depth the player is actually standing in: the body rests on the highest floor under its feet
+  G.water = world.waterAt && world.waterAt(pl.x, pl.z) > 0 ? clamp(WATER_Y - pl.y, 0, 1) : 0;
+  pl.wade = playing ? G.water : 0;
+  if (mats.atmos) mats.atmos(dt, G.state === 'title' ? 0 : bio);
 
   if (G.state === 'loading') {
     G.loadT += dt;
@@ -379,6 +433,7 @@ function step(dt) {
     const peers = net.peers();
     ents.myId = net.id || 'me';
     ents.syncPlayers(peers, dt, cam); ents.syncRemote(peers, dt);
+    G.mapOpen = map.isOpen; G.handOn = hand.on;
     ents.update(dt, t, pl, G);
     const pr = []; for (const s of world.sectors.values()) if (s.props) pr.push(s.props);
     anom.update(dt, t, pl, G, pr);
@@ -388,6 +443,9 @@ function step(dt) {
       const sx = Math.floor(pl.x / SEC_M), sz = Math.floor(pl.z / SEC_M), key = sx + ',' + sz;
       if (key !== G.secKey && enterSector(sx, sz)) G.secKey = key;
       G.stats.far = Math.max(G.stats.far, Math.round(Math.hypot(pl.x - 14.4, pl.z - 14.4)));
+      // a level counts once you have stood in it for a moment (borders are ragged)
+      if (bio !== G.place) { G.placeT += dt; if (G.placeT > 0.8) { G.place = bio; G.placeT = 0; enterPlace(bio); } } else G.placeT = 0;
+      if (G.place === BIOME.L37 && ents.fear < 0.2) G.sanity = Math.min(1, G.sanity + dt * 0.012); // the pools are kind
       // battery and flashlight
       if (pl.flashOn) { G.battery = Math.max(0, G.battery - dt / 380 * (ents.inDark > 0.2 ? 2.5 : 1)); if (G.battery <= 0) { pl.flashOn = false; audio.play('flashOff'); ui.toast({ title: 'CELL EMPTY', sub: 'The light is gone.', kind: 'danger' }); } }
       // sanity
@@ -428,7 +486,7 @@ function step(dt) {
     G.slowT -= dt; if (G.slowT <= 0) { G.slowT = 0.25; G.room = roomSize(); }
     const f = pl.flashDir;
     audio.setListener(cam.position.x, cam.position.y, cam.position.z, -Math.sin(pl.yaw), 0, -Math.cos(pl.yaw));
-    audio.update(dt, { hum: clamp(L / 1.1, 0, 1) * anom.pulse * (1 - ents.inDark), room: G.room, exertion: G.exertion, fear: playing ? ents.fear : 0, sanity: playing ? G.sanity : 1, dark: 1 - clamp(L / 0.4, 0, 1), blackout: Math.max(anom.blackout, ents.inDark), dead: playing && !G.alive, menu: G.state === 'title' });
+    audio.update(dt, { place: biomeOf(G.state === 'title' ? 0 : G.place).key, water: playing ? G.water : 0, tension: playing ? (ents.tension || 0) : 0, run: playing ? (ents.run || 0) : 0, hum: clamp(L / 1.1, 0, 1) * anom.pulse * (1 - ents.inDark), room: G.room, exertion: G.exertion, fear: playing ? ents.fear : 0, sanity: playing ? G.sanity : 1, dark: 1 - clamp(L / 0.4, 0, 1), blackout: Math.max(anom.blackout, ents.inDark), dead: playing && !G.alive, menu: G.state === 'title' });
   }
   hand.update(dt, { show: playing && G.alive && !ui.menuOpen && !map.isOpen, sanity: G.sanity, fear: ents.fear, speed: pl.speed });
   // network + hud
@@ -437,9 +495,10 @@ function step(dt) {
   if (playing && G.hudT <= 0) {
     G.hudT = 0.1;
     const s = G.sector || {};
-    ui.setHud({ health: clamp(G.health, 0, 1), sanity: G.sanity, stamina: pl.stamina, battery: G.battery, flashlight: pl.flashOn, crouch: pl.crouch, mic: G.talk, sector: s.code || '', sectorName: s.name || '', discoverer: s.by || null, depth: Math.round(Math.hypot(pl.x - 14.4, pl.z - 14.4)), players: net.online, detector: detector(), heading: -pl.yaw });
+    ui.setHud({ health: clamp(G.health, 0, 1), sanity: G.sanity, stamina: pl.stamina, battery: G.battery, flashlight: pl.flashOn, crouch: pl.crouch, mic: G.talk, sector: s.code || '', sectorName: (G.place ? biomeOf(G.place).level + ' · ' : '') + (s.name || ''), discoverer: s.by || null, depth: Math.round(Math.hypot(pl.x - 14.4, pl.z - 14.4)), players: net.online, detector: detector(), heading: -pl.yaw });
     ui.setSanityFx(clamp(1 - G.sanity * 1.5, 0, 1));
     if (set.showFps) ui.setFps(Math.round(1000 / ftAvg));
+    if (G.alive) noteEntities();
   }
   G.saveT -= dt;
   if (playing && G.saveT <= 0) {
@@ -464,7 +523,7 @@ function detector() {
   if (best > 0.15 && Math.random() < best * best * 0.5) audio.play('geiger', { vol: 0.35 });
   return best;
 }
-pl.onStep = (kind, loud) => audio.footstep(kind, loud);
+pl.onStep = (kind, loud) => audio.footstep(kind, loud, G.water > 0.04 ? 'water' : biomeOf(G.place).step);
 
 let last = performance.now(), manual = false;
 function loop(now) {

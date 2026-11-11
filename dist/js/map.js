@@ -2,6 +2,7 @@
 // One endless sheet of drafting paper, pan and zoom freely. Your own sectors are inked,
 // other people's are pencilled in. Canvas 2D only, drawn on demand.
 import { S, SEC, SEC_M, hash3, mulberry32, clamp, sectorCode } from './util.js';
+import { BIOME, WATER_Y, biomeOf } from './biomes.js';
 
 const INK = '#1b2230', PENCIL = '#6a655a', RED = '#a8281c', BLUE = '#2f5f8a', PAPER = '#e7dfc6';
 const LODS = [5, 14];              // pixels per cell for the cached sector drawings
@@ -31,6 +32,8 @@ function hand(ctx, x1, y1, x2, y2, rnd, amp = 0.7, over = 1.5) {
 }
 
 // Draw one sector plan into its own canvas.
+const WASH = { 1: 'rgba(66,76,84,.14)', 2: 'rgba(176,88,30,.14)', 3: 'rgba(132,30,44,.13)', 4: 'rgba(70,150,178,.12)', 5: 'rgba(196,30,24,.22)' };
+const WASH_WET = 'rgba(40,118,170,.26)';
 function drawSector(g, px, mine) {
   const N = SEC, cv = document.createElement('canvas');
   cv.width = cv.height = N * px + PAD * 2;
@@ -99,6 +102,21 @@ function drawSector(g, px, mine) {
     ctx.fillStyle = 'rgba(40,38,34,.15)';
     for (let j = 0; j < B; j++) for (let i = 0; i < B; i++) if (g.bays[i + j * B] === 'dark') ctx.fillRect(i * bp, j * bp, bp, bp);
   } else if (g.type === 'dark') { ctx.fillStyle = 'rgba(40,38,34,.16)'; ctx.fillRect(0, 0, N * px, N * px); }
+  // other levels: a thin wash of coloured pencil over their floor, cell by cell, so the ragged edge shows
+  if (g.bio) {
+    for (let z = 0; z < N; z++) {
+      let x = 0;
+      while (x < N) {
+        const i = x + z * N, b = g.solid[i] ? 0 : g.bio[i];
+        if (!b) { x++; continue; }
+        const wet = b === BIOME.L37 && g.floor[i] < WATER_Y - 0.02;
+        let x1 = x; while (x1 + 1 < N && !g.solid[x1 + 1 + z * N] && g.bio[x1 + 1 + z * N] === b && (b === BIOME.L37 && g.floor[x1 + 1 + z * N] < WATER_Y - 0.02) === wet) x1++;
+        ctx.fillStyle = wet ? WASH_WET : WASH[b] || WASH[1];
+        ctx.fillRect(x * px, z * px, (x1 - x + 1) * px, px);
+        x = x1 + 1;
+      }
+    }
+  }
   return cv;
 }
 
@@ -167,7 +185,7 @@ export function createMap(o) {
     while (queue.length && performance.now() - t0 < 7) {
       const q = queue.shift(), pk = q.sx + ',' + q.sz + ':' + q.claim.seed;
       let g = plans.get(pk); if (!g) { g = o.genSector(q.sx, q.sz, q.claim.seed); plans.set(pk, g); if (plans.size > 80) plans.delete(plans.keys().next().value); }
-      cache.set(q.key, { cv: drawSector(g, LODS[q.lod], q.claim.mine), t: performance.now() }); meta.set(q.sx + ',' + q.sz, { type: g.type, name: g.name, exit: g.exit }); n++;
+      cache.set(q.key, { cv: drawSector(g, LODS[q.lod], q.claim.mine), t: performance.now() }); meta.set(q.sx + ',' + q.sz, { type: g.type, name: g.name, exit: g.exit, biome: g.biome | 0 }); n++;
     }
     if (cache.size > 220) { const old = [...cache.entries()].sort((a, b) => a[1].t - b[1].t).slice(0, 60); for (const [k] of old) cache.delete(k); }
     if (n) dirty = true;
@@ -238,7 +256,7 @@ export function createMap(o) {
         const fs = clamp(secPx * 0.045, 9, 15);
         label(sectorCode(i, j).replace(/ /g, ''), X + fs * 0.7, Z + fs * 1.5, fs, c.mine ? INK : PENCIL, { bold: true, track: 0.06, bg: true });
         if (secPx > 190 && g) {
-          label(String(g.name || '').toUpperCase(), X + fs * 0.7, Z + fs * 2.75, fs * 0.82, c.mine ? INK : PENCIL, { alpha: 0.85, bg: true });
+          label(((g.biome ? biomeOf(g.biome).level + ' · ' : '') + String(g.name || '')).toUpperCase(), X + fs * 0.7, Z + fs * 2.75, fs * 0.82, c.mine ? INK : PENCIL, { alpha: 0.85, bg: true });
           label(c.by ? 'surveyed by ' + (String(c.by).startsWith('@') ? c.by : '@' + c.by) : 'surveyor unknown', X + fs * 0.7, Z + fs * 3.9, fs * 0.8, PENCIL, { alpha: 0.9, rot: -0.012, bg: true });
           if (g.type === 'dark') label('NO LIGHT', X + secPx / 2, Z + secPx / 2, fs * 1.5, RED, { align: 'center', bold: true, rot: -0.07, alpha: 0.8 });
         }

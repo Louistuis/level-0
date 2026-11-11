@@ -1,5 +1,19 @@
 # Credits
 
+## The Backrooms
+
+The setting is the Backrooms, a collaborative fiction that many people have written together since 2019.
+The levels in this game (Level 0 "The Lobby", Level 1 "Habitable Zone", Level 2 "Pipe Dreams", Level 5
+"Terror Hotel", Level 37 "Sublimity", Level ! "Run For Your Life!") and several of its entities (Smilers,
+Hounds, Skin-Stealers, Facelings) and Almond Water come from that shared canon as collected on the Backrooms
+wikis, which are licensed under [CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/):
+
+- <https://backrooms-wiki.wikidot.com>
+- <https://backrooms.fandom.com>
+
+Every description, name of a sector and line of text in the game is our own wording, and the layouts,
+models, textures and sounds are made for this game. The Howler and the Hollow are our own.
+
 ## 3D models
 
 The files in `dist/assets/pack/` are converted (cut out, decimated, re-textured as WebP) from these Sketchfab models.

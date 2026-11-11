@@ -3,6 +3,15 @@
 import * as THREE from './three.module.min.js';
 import { S, SEC, MAPN, CEIL, SEC_M, mod, hash01 } from './util.js';
 import { genSector } from './worldgen.js';
+import { BIOME, BIOME_KEYS, WATER_Y } from './biomes.js';
+
+// Dev switch: ?place=level1 (any BIOMES key) renders every cell as that place, and bioAt reports it.
+export const PLACE = (() => { try { return BIOME_KEYS.indexOf(new URLSearchParams(location.search).get('place')); } catch (e) { return -1; } })();
+// place id of cell i of sector data d (0 = Level 0 when the generator has not set one)
+const bioOf = (d, i) => (PLACE >= 0 ? PLACE : d && d.bio ? d.bio[i] : 0);
+const anyBio = (d) => { if (PLACE > 0) return true; if (!d || !d.bio) return false; if (d._bioAny === undefined) d._bioAny = d.bio.some((v) => v > 0); return d._bioAny; };
+// Places whose lamps sit in a ceiling recess (the troffer); the others get hanging or surface fittings
+const RECESS = [true, false, false, false, true, true];
 
 // One reusable, growable vertex buffer for sector meshing (no per-vertex array pushes).
 const MB = {
@@ -46,6 +55,13 @@ export class World {
     this.texOcc = new THREE.DataTexture(this.occ, MAPN, MAPN, THREE.RedFormat, THREE.UnsignedByteType);
     this.texInd = new THREE.DataTexture(this.ind, MAPN, MAPN, THREE.RedFormat, THREE.UnsignedByteType);
     for (const t of [this.texOcc, this.texInd]) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.magFilter = t.minFilter = THREE.LinearFilter; t.unpackAlignment = 1; t.needsUpdate = true; }
+    // place id per cell for the shaders (255 = solid), and whether any place but Level 0 is in the window
+    this.bio = new Uint8Array(MAPN * MAPN);
+    this.texBio = new THREE.DataTexture(this.bio, MAPN, MAPN, THREE.RedFormat, THREE.UnsignedByteType);
+    this.texBio.magFilter = this.texBio.minFilter = THREE.NearestFilter; this.texBio.unpackAlignment = 1; this.texBio.needsUpdate = true;
+    this.bioAny = { value: PLACE > 0 ? 1 : 0 };
+    this.waterMaterial = null;
+    this.materialP = null;   // world shader with the places compiled in (set by makeMaterials)
     this.texCell = new THREE.DataTexture(this.cell, MAPN, MAPN, THREE.RGBAFormat, THREE.FloatType);
     this.texCell.wrapS = this.texCell.wrapT = THREE.RepeatWrapping; this.texCell.magFilter = this.texCell.minFilter = THREE.NearestFilter; this.texCell.needsUpdate = true;
     this.psx = 1e9; this.psz = 1e9;
@@ -87,7 +103,9 @@ export class World {
       if (dd > 13 * 13) continue;
       if (!this.los(px, pz, x, (lz + 0.5) * S) && !this.los(px, pz, x, (lz + 1.5) * S)) continue;
       const t = mod(lx, MAPN) + mod(lz, MAPN) * MAPN;
-      list.push([dd, x, this.cell[t * 4 + 1] - 0.05, z, ty + this.cell[t * 4 + 2] * 0.999]);
+      // w = place * 4 + type + phase (the haze colours each lamp by its place)
+      const bi = this.bio[t] === 255 ? 0 : this.bio[t];
+      list.push([dd, x, this.cell[t * 4 + 1] - 0.05, z, bi * 4 + ty + this.cell[t * 4 + 2] * 0.999]);
     }
     list.sort((a, b) => a[0] - b[0]);
     const n = Math.min(HZ, list.length);
@@ -122,10 +140,12 @@ export class World {
     for (const s of this.sectors.values()) {
       if (s.live) this.onUnload(s);
       if (s.mesh) { this.scene.remove(s.mesh); s.mesh.geometry.dispose(); }
+      this._dropWater(s);
     }
     this.sectors.clear(); this.written.clear(); this._last = null;
-    this.occ.fill(255); this.cell.fill(0); this.inj.fill(0); this.L.fill(0); this.ind.fill(0);
-    this.texOcc.needsUpdate = this.texCell.needsUpdate = this.texInd.needsUpdate = true;
+    this.occ.fill(255); this.cell.fill(0); this.inj.fill(0); this.L.fill(0); this.ind.fill(0); this.bio.fill(0);
+    this.texOcc.needsUpdate = this.texCell.needsUpdate = this.texInd.needsUpdate = this.texBio.needsUpdate = true;
+    this.bioAny.value = PLACE > 0 ? 1 : 0;
     this.psx = 1e9; this.ready = false; this.sweepsLeft = 0; this._hzKey = ''; this.hzN.value = 0;
   }
 
@@ -147,6 +167,31 @@ export class World {
   light(x, z) { return this.L[mod(Math.floor(x / S), MAPN) + mod(Math.floor(z / S), MAPN) * MAPN]; }
   lampAt(gx, gz) { const d = this._d(gx, gz); return d ? d.lamp[mod(gx, SEC) + mod(gz, SEC) * SEC] : 0; }
   sectorOf(x, z) { return this.sec(Math.floor(x / SEC_M), Math.floor(z / SEC_M)); }
+  // Place id (BIOME) at a world position; 0 where nothing is loaded.
+  bioAt(x, z) {
+    const gx = Math.floor(x / S), gz = Math.floor(z / S), d = this._d(gx, gz);
+    if (!d) return PLACE >= 0 ? PLACE : 0;
+    return bioOf(d, mod(gx, SEC) + mod(gz, SEC) * SEC);
+  }
+  // Depth of standing water (Level 37 pools) at a world position, metres; 0 when dry.
+  waterAt(x, z) {
+    const gx = Math.floor(x / S), gz = Math.floor(z / S), d = this._d(gx, gz);
+    if (!d) return 0;
+    const i = mod(gx, SEC) + mod(gz, SEC) * SEC;
+    if (d.solid[i] || bioOf(d, i) !== BIOME.L37 || !(d.floor[i] < WATER_Y - 0.02)) return 0;
+    return WATER_Y - d.floor[i];
+  }
+  // Level 0 sectors far from any other place keep the plain (cheaper) world shader
+  _matFor(s) {
+    if (!this.materialP) return this.material;
+    if (PLACE > 0) return this.materialP;
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+      const n = dx || dz ? this.sec(s.sx + dx, s.sz + dz) : s;
+      if (n && anyBio(n.data)) return this.materialP;
+    }
+    return this.material;
+  }
+  _dropWater(s) { if (s.water) { this.scene.remove(s.water); s.water.geometry.dispose(); s.water = null; } }
 
   // Can something standing in cell a walk into cell b (stairs yes, ledges only downward).
   step(ax, az, bx, bz, h = 1.0) {
@@ -241,7 +286,7 @@ export class World {
     for (const [k, s] of this.sectors) {
       const x0 = s.sx * SEC_M, z0 = s.sz * SEC_M;
       const dist = Math.hypot(Math.max(x0 - px, 0, px - (x0 + SEC_M)), Math.max(z0 - pz, 0, pz - (z0 + SEC_M)));
-      if (s.mesh && dist > this.meshR + 14) { this.scene.remove(s.mesh); s.mesh.geometry.dispose(); s.mesh = null; s.dirty = true; if (s.live) { this.onUnload(s); s.live = false; } }
+      if (s.mesh && dist > this.meshR + 14) { this.scene.remove(s.mesh); s.mesh.geometry.dispose(); s.mesh = null; this._dropWater(s); s.dirty = true; if (s.live) { this.onUnload(s); s.live = false; } }
       if (dist > SEC_M * 5) { this.sectors.delete(k); if (this._last === s.data) this._last = null; }
     }
     if (this.sweepsLeft > 0) { this._sweep(2); this.sweepsLeft -= 2; }
@@ -262,8 +307,12 @@ export class World {
       this._write(s.data); this.written.set(k, s.data.seed); changed = true;
     }
     for (const k of this.written.keys()) if (!keep.has(k)) this.written.delete(k);
+    let any = PLACE > 0;
+    if (!any) for (const k of keep) { const s = this.sectors.get(k); if (s && anyBio(s.data)) { any = true; break; } }
+    this.bioAny.value = any ? 1 : 0;
+    for (const s of this.sectors.values()) if (s.mesh) { const m = this._matFor(s); if (s.mesh.material !== m) s.mesh.material = m; }
     if (changed) {
-      this.texOcc.needsUpdate = true; this.texCell.needsUpdate = true;
+      this.texOcc.needsUpdate = true; this.texCell.needsUpdate = true; this.texBio.needsUpdate = true;
       this._sweep(this.ready ? 6 : 14); this.sweepsLeft = 40;
     }
   }
@@ -274,6 +323,7 @@ export class World {
       for (let x = 0; x < SEC; x++) {
         const i = x + z * SEC, t = mod(ox + x, MAPN) + tz;
         this.occ[t] = d.solid[i] ? 255 : 0;
+        this.bio[t] = d.solid[i] ? 255 : bioOf(d, i);
         const lt = d.lamp[i], base = lt & 7;
         // solid cells get ceiling -50 / floor 50 so the shaders' contact shadow test treats them as walls
         this.cell[t * 4] = lt; this.cell[t * 4 + 1] = d.solid[i] ? -50 : d.ceil[i]; this.cell[t * 4 + 2] = d.phase[i] / 255; this.cell[t * 4 + 3] = d.solid[i] ? 50 : d.floor[i];
@@ -345,13 +395,15 @@ export class World {
       if (mask & 32) quad(x0, y0, z0, x1, y0, z0, x1, y1, z0, x0, y1, z0, 0, 0, -1, mat, base);
     };
     const nb = [this.data(sx + 1, sz), this.data(sx - 1, sz), this.data(sx, sz + 1), this.data(sx, sz - 1)];
-    let nS = 0, nF = 0, nC = 0, nL = 0;
+    let nS = 0, nF = 0, nC = 0, nL = 0, nB = 0;
     const look = (x, z) => {
       let src = d;
       if (x >= SEC) { src = nb[0]; x -= SEC; } else if (x < 0) { src = nb[1]; x += SEC; } else if (z >= SEC) { src = nb[2]; z -= SEC; } else if (z < 0) { src = nb[3]; z += SEC; }
-      if (!src || x < 0 || z < 0 || x >= SEC || z >= SEC) { nS = 1; nF = 0; nC = 0; nL = 0; return; }
-      const i = x + z * SEC; nS = src.solid[i]; nF = src.floor[i]; nC = src.ceil[i]; nL = src.lamp[i];
+      if (!src || x < 0 || z < 0 || x >= SEC || z >= SEC) { nS = 1; nF = 0; nC = 0; nL = 0; nB = 0; return; }
+      const i = x + z * SEC; nS = src.solid[i]; nF = src.floor[i]; nC = src.ceil[i]; nL = src.lamp[i]; nB = bioOf(src, i);
     };
+    // water surfaces of Level 37 pools, one quad per flooded cell
+    const WP = [];
     const solidL = (x, z) => (x >= 0 && z >= 0 && x < SEC && z < SEC ? d.solid[x + z * SEC] === 1 : this.solid(ox + x, oz + z));
     const ceilL = (x, z) => (x >= 0 && z >= 0 && x < SEC && z < SEC ? d.ceil[x + z * SEC] : this.ceilC(ox + x, oz + z));
     const doorCeil = (cc) => cc > 1.85 && cc < 2.35;
@@ -362,16 +414,42 @@ export class World {
       if (d.solid[i]) continue;
       const f = d.floor[i], c = d.ceil[i], gx = ox + x, gz = oz + z;
       const X0 = gx * S, X1 = X0 + S, Z0 = gz * S, Z1 = Z0 + S;
+      const bi = bioOf(d, i);
+      // which trim this place has: the dropped-ceiling grid (Level 0, Level !), skirting, door casings
+      const grid = bi === 0 || bi === BIOME.LRUN, skirt = bi === 0 || bi === BIOME.L5 || bi === BIOME.LRUN, cased = skirt;
       quad(X0, f, Z0, X0, f, Z1, X1, f, Z1, X1, f, Z0, 0, 1, 0, 0, f);
+      if (bi === BIOME.L37 && f < WATER_Y - 0.02) WP.push(X0, Z0, X1, Z1);
       // ---- ceiling ----
       const lt = d.lamp[i];
-      if (lt && lt < 8) {
+      if (!RECESS[bi]) {
+        // bare slab or plaster: flat, the fitting hangs from it (extra 7 = never a lens)
+        quad(X0, c, Z0, X1, c, Z0, X1, c, Z1, X0, c, Z1, 0, -1, 0, 1, lt ? 7 : 0);
+        if (lt && lt < 8) {
+          const cx = X0 + S / 2, cz = Z1;
+          if (bi === BIOME.L1) {
+            // twin-tube batten on two short hangers
+            const z0 = Z0 + 0.1, z1 = Z1 + S - 0.1, y0 = c - 0.13, y1 = c - 0.05;
+            box(cx - 0.075, y0, z0, cx + 0.075, y1, z1, 63, 10, 0);
+            box(cx - 0.004, y1, z0 + 0.1, cx + 0.004, c, z0 + 0.108, 63, 5, 0); box(cx - 0.004, y1, z1 - 0.108, cx + 0.004, c, z1 - 0.1, 63, 5, 0);
+          } else if (bi === BIOME.L2) {
+            // a bare bulb in a little steel shade on its cord
+            box(cx - 0.035, c - 0.23, cz - 0.035, cx + 0.035, c - 0.15, cz + 0.035, 63, 10, 1);
+            box(cx - 0.11, c - 0.15, cz - 0.11, cx + 0.11, c - 0.12, cz + 0.11, 1 | 2 | 4 | 16 | 32, 5, 0);
+            box(cx - 0.004, c - 0.12, cz - 0.004, cx + 0.004, c, cz + 0.004, 63, 5, 0);
+          } else {
+            // frosted dome on a brass rim
+            box(cx - 0.21, c - 0.075, cz - 0.21, cx + 0.21, c, cz + 0.21, 1 | 2 | 8 | 16 | 32, 10, 2);
+          }
+        }
+      } else if (lt && lt < 8) {
         // troffer: diffuser sits LR above the grid inside a white sheet-metal housing
         const two = z + 1 < SEC && d.lamp[i + SEC] === lt + 8 && !d.solid[i + SEC];
         const ZE = two ? Z1 + S : Z1, cr = c + LR;
         quad(X0, cr, Z0, X1, cr, Z0, X1, cr, ZE, X0, cr, ZE, 0, -1, 0, 1, 0);
         vq(X0, Z0, X1, Z0, c, cr, 0, 1, 7, 0); vq(X1, ZE, X0, ZE, c, cr, 0, -1, 7, 0);
         vq(X0, ZE, X0, Z0, c, cr, 1, 0, 7, 0); vq(X1, Z0, X1, ZE, c, cr, -1, 0, 7, 0);
+      } else if (!lt && bi === BIOME.L37) {
+        quad(X0, c, Z0, X1, c, Z0, X1, c, Z1, X0, c, Z1, 0, -1, 0, 1, 0);
       } else if (!lt) {
         const h = hash01(gx, gz, seed ^ 0x51e7);
         if (h < 0.006) {
@@ -423,16 +501,19 @@ export class World {
         const jamb = (sgn) => { const cx = x + tx * sgn, cz = z + tz * sgn; return !solidL(cx, cz) && !solidL(cx - nx, cz - nz) && doorCeil(ceilL(cx - nx, cz - nz)) && Math.abs(ceilL(cx, cz) - c) < 0.01; };
         const oA = full && outer(-1), oB = full && outer(1);
         const jA = oA && wb === f && jamb(-1), jB = oB && wb === f && jamb(1);
-        if (wb === f && wt - wb > 0.5) {
+        if (skirt && wb === f && wt - wb > 0.5) {
           // skirting board, wrapped round outer corners, stopping at a door casing
-          const wA = oA && !jA, wB = oB && !jB;
-          strip(wA ? -ST : 0, wB ? S + ST : S, f, f + SK, ST, FRONT | 4 | (wA ? END_A : 0) | (wB ? END_B : 0), 4, f);
+          const wA = oA && !jA, wB = oB && !jB, hotel = bi === BIOME.L5, sk = hotel ? 0.17 : SK, st = hotel ? 0.02 : ST;
+          strip(wA ? -st : 0, wB ? S + st : S, f, f + sk, st, FRONT | 4 | (wA ? END_A : 0) | (wB ? END_B : 0), 4, f);
+          // the hotel's chair rail, on top of the wainscot
+          if (hotel && full && wt - wb > 1.2) strip(wA ? -0.024 : 0, wB ? S + 0.024 : S, f + 0.9, f + 0.95, 0.024, FRONT | 4 | 8 | (wA ? END_A : 0) | (wB ? END_B : 0), 4, f);
         }
-        if (wt >= c - 0.001) {
-          // wall angle where the grid meets the wall
-          strip(oA ? -AW : 0, oB ? S + AW : S, c - AH, c, AW, FRONT | 8 | (oA ? END_A : 0) | (oB ? END_B : 0), 5, 0);
+        if (wt >= c - 0.001 && (grid || (bi === BIOME.L5 && full))) {
+          // wall angle where the grid meets the wall (a deeper plaster cornice in the hotel)
+          const aw = grid ? AW : 0.07, ah = grid ? AH : 0.09;
+          strip(oA ? -aw : 0, oB ? S + aw : S, c - ah, c, aw, FRONT | 8 | (oA ? END_A : 0) | (oB ? END_B : 0), 5, 0);
         }
-        if (full && wb === f) {
+        if (cased && full && wb === f) {
           const hdr = (sgn) => ceilL(x + tx * sgn - nx, z + tz * sgn - nz);
           // door casing up each jamb (the head casing is added on the head face below)
           if (jA) strip(0, CW, f, hdr(-1) + CW, CT, FRONT | END_A | END_B | 4, 9, f);
@@ -450,7 +531,7 @@ export class World {
             strip(0.12, S - 0.12, c - 0.42, c - 0.24, 0.006, 63, 8, 2);
           }
         }
-        if (header) {
+        if (header && cased) {
           // casing under a door head; the opening is the neighbour cell (x - n). Past the
           // opening's ends it runs on over the jamb casings.
           const nc = wb;
@@ -469,8 +550,8 @@ export class World {
           let ok = false, cc = 0;
           if (t < SEC) {
             const xa = axis ? line - 1 : t, za = axis ? t : line - 1, xb = axis ? line : t, zb = axis ? t : line;
-            const ca = cellCeil(xa, za), la = nL, cb = cellCeil(xb, zb), lb = nL;
-            if (ca === ca && cb === cb && Math.abs(ca - cb) < 0.001) {
+            const ca = cellCeil(xa, za), la = nL, ba = nB, cb = cellCeil(xb, zb), lb = nL, bb = nB;
+            if (ca === ca && cb === cb && Math.abs(ca - cb) < 0.001 && (ba === 0 || ba === BIOME.LRUN) && (bb === 0 || bb === BIOME.LRUN)) {
               ok = !(axis === 0 && la > 0 && la < 8 && lb === la + 8);
               cc = ca;
             }
@@ -494,9 +575,25 @@ export class World {
     this.meshMs = performance.now() - t0;
     geo.boundingSphere = new THREE.Sphere(new THREE.Vector3((ox + SEC / 2) * S, 1, (oz + SEC / 2) * S), SEC_M * 0.75 + 9);
     if (s.mesh) { this.scene.remove(s.mesh); s.mesh.geometry.dispose(); }
-    s.mesh = new THREE.Mesh(geo, this.material);
+    s.mesh = new THREE.Mesh(geo, this._matFor(s));
     s.mesh.matrixAutoUpdate = false;
     this.scene.add(s.mesh);
+    this._dropWater(s);
+    if (WP.length && this.waterMaterial) {
+      const n = WP.length / 4, pos = new Float32Array(n * 12), idx = new Uint32Array(n * 6);
+      for (let k = 0; k < n; k++) {
+        const a = WP[k * 4], b = WP[k * 4 + 1], c2 = WP[k * 4 + 2], e = WP[k * 4 + 3], o = k * 12, v = k * 4;
+        pos.set([a, WATER_Y, b, a, WATER_Y, e, c2, WATER_Y, e, c2, WATER_Y, b], o);
+        idx.set([v, v + 1, v + 2, v, v + 2, v + 3], k * 6);
+      }
+      const wg = new THREE.BufferGeometry();
+      wg.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+      wg.setIndex(new THREE.BufferAttribute(idx, 1));
+      wg.boundingSphere = geo.boundingSphere.clone();
+      s.water = new THREE.Mesh(wg, this.waterMaterial);
+      s.water.matrixAutoUpdate = false; s.water.renderOrder = 2;
+      this.scene.add(s.water);
+    }
     s.dirty = false;
     if (s.live) this.onUnload(s);
     s.live = true; this.onLoad(s);

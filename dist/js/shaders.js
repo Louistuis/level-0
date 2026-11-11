@@ -2,6 +2,7 @@
 // every ceiling lamp is a real light read from the world-map texture, shadowed by
 // marching the occupancy map, plus a diffused bounce term and flashlights.
 import * as THREE from './three.module.min.js';
+import { BIOMES, WATER_Y } from './biomes.js';
 
 const LIGHT = /* glsl */`
 uniform sampler2D uOcc;
@@ -25,6 +26,20 @@ uniform float uHaze;
 uniform float uHazeFlash;
 uniform vec2 uFogEnd;
 const float CS = 0.6;
+// places (0.3), compiled in only with PLACES (the plain world shader is the Level 0 one, unchanged):
+// id per cell (255 = solid), whether any place but Level 0 is in the window,
+// lamp colour x strength and bounce colour per place (BIOMES order)
+#ifdef PLACES
+uniform sampler2D uBio;
+uniform float uBioAny;
+uniform vec3 uBioLight[6];
+uniform vec3 uBioBounce[6];
+#define LSUM vec3
+#define LTINT vec3(1.0)
+#else
+#define LSUM float
+#define LTINT LAMPCOL
+#endif
 const float MAPN = 256.0;
 // warm, sodium-tinted fluorescent: whites read yellow-cream, never neutral
 const vec3 LAMPCOL = vec3(1.0, 0.9, 0.55);
@@ -42,6 +57,8 @@ const vec3 FLASHCOL = vec3(0.84, 0.93, 1.0);   // cool LED, survives the warm gr
 // set by the world shader before shade(): contact occlusion (1 = open) and how wet the surface is
 float gAO = 1.0;
 float gWet = 0.0;
+// place at the shaded point (-1: look it up from the map)
+float gPlace = -1.0;
 
 float hash11(float p){ p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p); }
 float hash21(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
@@ -65,6 +82,15 @@ float lampFlicker(float type, float ph){
   }
   return 0.0;
 }
+// Level ! alarm: every lamp swells and sinks together, slow enough to bear
+float alarmK(){ float s = sin(uTime * 2.2); return 0.16 + 0.84 * smoothstep(-0.35, 0.95, s); }
+#ifdef PLACES
+float bioFetch(vec2 c){ return floor(texelFetch(uBio, ivec2(mod(c, MAPN)), 0).r * 255.0 + 0.5); }
+vec3 placeLight(float b){ int i = int(clamp(b, 0.0, 5.0)); vec3 c = uBioLight[i]; return i == 5 ? c * alarmK() : c; }
+#define LAMPAT(c) (uBioAny > 0.5 ? placeLight(bioFetch(c)) : LAMPCOL)
+#else
+#define LAMPAT(c) LAMPCOL
+#endif
 float dk(vec2 xz){ return 1.0 - uDark.w * (1.0 - smoothstep(uDark.z * 0.55, uDark.z, distance(xz, uDark.xy))); }
 
 float occl(vec3 P, vec3 Lp, float jit){
@@ -114,7 +140,7 @@ vec3 shade(vec3 P, vec3 N, vec3 Ng, vec3 alb, float gloss, vec3 V){
   float jit = ign(gl_FragCoord.xy);
   vec3 Po = P + Ng * 0.3;
   vec2 base = floor((P.xz / CS - 3.5) / 6.0 + 0.5);
-  float dif = 0.0, sp = 0.0, sw = 0.0;
+  LSUM dif = LSUM(0.0), sp = LSUM(0.0), sw = LSUM(0.0);
   float ndv = max(dot(N, V), 0.0);
   for (int j = -1; j <= 1; j++) for (int i = -1; i <= 1; i++) {
     vec2 lc = (base + vec2(float(i), float(j))) * 6.0 + 3.0;
@@ -133,21 +159,33 @@ vec3 shade(vec3 P, vec3 N, vec3 Ng, vec3 alb, float gloss, vec3 V){
     float a = lampFlicker(info.r, info.b) * dk(Lp.xz) * w * ndl * emit / (d2 + 0.7);
     if (a < 0.0012) continue;
     a *= occl(Po, Lp, jit);
-    dif += a;
+#ifdef PLACES
+    vec3 lcol = LAMPAT(lc);
+#else
+    const float lcol = 1.0;
+#endif
+    dif += a * lcol;
     vec3 H = normalize(Ld + V);
     float nh = max(dot(N, H), 0.0);
-    sp += a * pow(nh, 22.0);
-    sw += a * pow(nh, 160.0);
+    sp += a * pow(nh, 22.0) * lcol;
+    sw += a * pow(nh, 160.0) * lcol;
   }
   // direct light keeps a little of the contact shadow, bounce light keeps all of it
   float aoD = mix(1.0, gAO, 0.45);
-  vec3 col = (alb * dif * aoD + gloss * sp * 0.16) * LAMPCOL * (9.5 * uPulse);
+  vec3 col = (alb * dif * aoD + gloss * sp * 0.16) * LTINT * (9.5 * uPulse);
   // wet carpet: a sharp, grazing sheen of every lamp
   float fres = 0.04 + 0.96 * pow(1.0 - ndv, 5.0);
-  col += gWet * sw * fres * LAMPCOL * (9.5 * uPulse) * 2.4;
+  col += gWet * sw * fres * LTINT * (9.5 * uPulse) * 2.4;
   float ind = texture(uInd, (Po.xz / CS) / MAPN).r; ind *= ind * 2.5;
   // bounce: the walls are yellow, so light that has bounced in a corner comes back yellower
   vec3 bounceCol = mix(vec3(1.0, 0.86, 0.46), vec3(1.0, 0.82, 0.36), (1.0 - gAO) * 0.8);
+#ifdef PLACES
+  if (uBioAny > 0.5) {
+    // elsewhere it takes the colour of that place's lamps and walls
+    float pb = gPlace >= 0.0 ? gPlace : bioFetch(floor(P.xz / CS));
+    if (pb > 0.5 && pb < 5.5) bounceCol = uBioBounce[int(pb)] * mix(1.0, 0.82, (1.0 - gAO) * 0.8) * (pb > 4.5 ? alarmK() : 1.0);
+  }
+#endif
   col += alb * ind * bounceCol * (0.1 * uPulse) * dk(P.xz) * (N.y < -0.5 ? 1.9 : 1.0) * gAO;
   col += alb * vec3(0.0055, 0.005, 0.004) * gAO;
   if (uFlash > 0.001) {
@@ -175,20 +213,25 @@ vec3 shade(vec3 P, vec3 N, vec3 Ng, vec3 alb, float gloss, vec3 V){
 // player as a point source, integrated in closed form along the ray, plus the torch beam marched.
 vec3 haze(vec3 P){
   vec3 C = cameraPosition; vec3 rd = P - C; float D = length(rd); rd /= max(D, 1e-4);
-  float acc = 0.0;
+  LSUM acc = LSUM(0.0);
   for (int k = 0; k < HZ_MAX; k++) {
     if (float(k) >= uHzN) break;
     vec4 L = uHz[k];
-    float ty = floor(L.w);
+    // w = place * 4 + lamp type + phase * 0.999
+    float code = floor(L.w), pb = floor(code / 4.0), ty = code - pb * 4.0;   // pb unused without PLACES
     float I = lampFlicker(ty, fract(L.w) / 0.999);
     if (I < 0.01) continue;
     vec3 oc = L.xyz - C; float b = dot(oc, rd);
     float h = sqrt(max(dot(oc, oc) - b * b, 0.12));
     float s = (atan((D - b) / h) - atan(-b / h)) / h;
     // the panel lights the air below it; a little range limit like the surface lights
+#ifdef PLACES
+    acc += I * dk(L.xz) * s * clamp(1.0 - (dot(oc, oc)) / 170.0, 0.0, 1.0) * placeLight(pb);
+#else
     acc += I * dk(L.xz) * s * clamp(1.0 - (dot(oc, oc)) / 170.0, 0.0, 1.0);
+#endif
   }
-  vec3 sc = acc * LAMPCOL * uPulse * uHaze * 0.0075;
+  vec3 sc = acc * LTINT * uPulse * uHaze * 0.0075;
 #if HAZE_STEPS > 0
   if (uFlash > 0.001) {
     float Dm = min(D, 11.0), j = ign(gl_FragCoord.xy + 17.0), fb = 0.0;
@@ -230,6 +273,24 @@ vec3 fog(vec3 col, vec3 P){
 }
 `;
 
+// Still water (Level 37): wave height and slope from the macro noise, and a moving caustic net.
+const WATERFN = /* glsl */`
+const float WATER_Y = ${WATER_Y.toFixed(4)};
+float waveH(vec2 p){
+  float t = uTime;
+  return texture(tNoise, p * 0.23 + vec2(t * 0.012, t * 0.008)).g + 0.55 * texture(tNoise, p * 0.61 + vec2(-t * 0.019, t * 0.014)).g
+       + 0.2 * texture(tNoise, p * 1.3 + vec2(t * 0.031, -t * 0.027)).r;
+}
+vec2 waveSlope(vec2 p){ const float e = 0.05; float h = waveH(p); return vec2(waveH(p + vec2(e, 0.0)) - h, waveH(p + vec2(0.0, e)) - h) / e; }
+float caustic(vec2 p){
+  float t = uTime * 0.45;
+  vec2 w = p * 2.6 + vec2(vnoise(p * 1.3 + t * 0.4), vnoise(p * 1.3 - t * 0.37 + 9.0)) * 2.2;
+  float a = 1.0 - abs(vnoise(w + vec2(t, -t * 0.7)) * 2.0 - 1.0);
+  float b = 1.0 - abs(vnoise(w * 1.37 + vec2(-t * 0.8, t * 0.5) + 4.0) * 2.0 - 1.0);
+  return pow(a, 14.0) * 0.8 + pow(b, 14.0) * 0.6 + pow(a * b, 6.0) * 0.5;
+}
+`;
+
 const WORLD_VS = /* glsl */`
 attribute vec4 aMat;
 varying vec3 vW; varying vec3 vN; varying vec4 vMat;
@@ -239,7 +300,9 @@ void main(){ vW = position; vN = normal; vMat = aMat; gl_Position = projectionMa
 const WORLD_FS = /* glsl */`
 varying vec3 vW; varying vec3 vN; varying vec4 vMat;
 uniform sampler2D tWall; uniform sampler2D tWallN; uniform sampler2D tCarpet; uniform sampler2D tCarpetN; uniform sampler2D tCeil; uniform sampler2D tCeilN; uniform sampler2D tNoise;
+uniform mediump sampler2DArray tPlace; uniform mediump sampler2DArray tPlaceN;
 ${LIGHT}
+${WATERFN}
 vec4 cellAt(vec2 c){ return texelFetch(uCell, ivec2(mod(c, MAPN)), 0); }
 float contact(float d, float r){ float x = clamp(d / r, 0.0, 1.0); return (1.0 - x) * (1.0 - x); }
 // is cell n a wall at height y? (solid cells carry floor 50 / ceiling -50)
@@ -286,16 +349,12 @@ float worldAO(vec3 P, vec3 Ng, out float edge){
   return ao;
 }
 float aaFade(vec2 p){ vec2 w = fwidth(p); return clamp(1.5 - 2.0 * max(w.x, w.y), 0.0, 1.0); }
-void main(){
-  vec3 Ng = normalize(vN); float mat = vMat.x;
-  vec3 V = normalize(cameraPosition - vW);
-  bool vert = abs(Ng.y) < 0.5;
-  vec3 alb; vec3 tn = vec3(0.0, 0.0, 1.0); float gloss = 0.0; vec3 emis = vec3(0.0);
-  vec3 T = vert ? (abs(Ng.x) > 0.5 ? vec3(0, 0, 1) : vec3(1, 0, 0)) : vec3(1, 0, 0);
-  vec3 B = vert ? vec3(0, 1, 0) : vec3(0, 0, 1);
-  float u = abs(Ng.x) > 0.5 ? vW.z : vW.x;
-  float edge;
-  gAO = worldAO(vW, Ng, edge);
+// shared by the material functions below
+vec3 sAlb; vec3 sTn; float sGloss; vec3 sEmis; float sMat; vec3 sNg; float sU; float sEdge; bool sVert; vec2 sOff; float sHb; float sHc;
+// Level 0 surfaces (and the trim every place shares), exactly as before 0.3.
+void l0Surface(){
+  float mat = sMat; bool vert = sVert; float u = sU; float edge = sEdge; vec3 Ng = sNg;
+  vec3 alb = vec3(0.0); vec3 tn = vec3(0.0, 0.0, 1.0); float gloss = 0.0; vec3 emis = vec3(0.0);
   if (mat < 0.5 || (mat > 2.5 && mat < 3.5)) {
     // ---- carpet: worn, damp commercial loop pile ----
     bool fl = mat < 0.5;
@@ -325,7 +384,7 @@ void main(){
     // ---- ceiling: mineral fibre tiles in a grid, or the lens of a troffer ----
     vec2 cellc = floor(vW.xz / CS), f = fract(vW.xz / CS);
     vec4 info = cellAt(cellc);
-    if (info.r > 0.5) {
+    if (info.r > 0.5 && vMat.y < 6.5) {
       bool second = info.r > 7.5;
       float type = second ? info.r - 8.0 : info.r;
       float pv = second ? f.y + 1.0 : f.y;
@@ -341,7 +400,7 @@ void main(){
       float glow = (1.55 + 3.7 * tubes) * mix(0.62, 1.0, smoothstep(0.03, 0.3, along));
       vec3 tint = vec3(1.0);
       if (type > 2.5 && type < 3.5) { glow *= smoothstep(0.04, 0.55, along); tint = vec3(1.0, 0.84, 0.62); }
-      emis = lensM * I * LAMPCOL * tint * glow * prism;
+      emis = lensM * I * LAMPAT(second ? cellc - vec2(0.0, 1.0) : cellc) * tint * glow * prism;
       // unlit lens: milky, the tubes show as grey bars, dust and dead flies lie along the bottom
       vec2 bc = floor(vec2(f.x, pv) * vec2(36.0, 70.0));
       float bugs = step(0.955, hash21(bc + cellc * 3.1)) * (1.0 - smoothstep(0.0, 0.45, along)) * (type > 3.5 ? 1.0 : 0.5);
@@ -441,7 +500,7 @@ void main(){
     float type = mod(info.r, 8.0);
     float I = (type > 0.5 && type < 3.5) ? lampFlicker(type, info.b) * dk(vW.xz) * uPulse : 0.0;
     alb = vec3(0.6, 0.6, 0.57); gloss = 0.3;
-    emis = I * LAMPCOL * (0.35 + 1.1 * vMat.w * vMat.w);
+    emis = I * LAMPAT(floor(vW.xz / CS + Ng.xz * 0.5) - vec2(0.0, info.r > 7.5 ? 1.0 : 0.0)) * (0.35 + 1.1 * vMat.w * vMat.w);
   } else if (mat < 8.5) {
     // ---- plates: outlet, switch, wall grille ----
     vec2 q = vMat.zw;
@@ -463,18 +522,298 @@ void main(){
       tn = vec3(0.0, frame * (slat - 0.5) * 1.2, 1.0);
     }
     alb *= 0.85 + 0.15 * texture(tNoise, q * 0.3 + vW.xz).a;
-  } else {
+  } else if (mat < 9.5) {
     // ---- door casing: painted timber, grubby where hands and boots go ----
     vec4 n0 = texture(tNoise, vec2(u, vW.y) * 0.9);
     float hb = vW.y - vMat.y;
     alb = vec3(0.46, 0.39, 0.23) * (0.86 + 0.24 * n0.r);
     alb *= mix(0.72, 1.0, smoothstep(0.0, 0.35, hb)) * (1.0 - 0.18 * smoothstep(1.4, 1.1, abs(hb - 1.15)) * n0.g);
     gloss = 0.22;
+  } else {
+    // ---- light fittings of the other places: bare twin-tube strip, caged bulb, ceiling dome ----
+    vec2 c = floor(vW.xz / CS - Ng.xz * 0.01); vec4 info = cellAt(c);
+    if (info.r > 7.5) { c -= vec2(0.0, 1.0); info = cellAt(c); }
+    float I = (info.r > 0.5 && info.r < 3.5) ? lampFlicker(info.r, info.b) * dk(vW.xz) * uPulse : 0.0;
+    vec3 lc = LAMPAT(c);
+    vec2 q = vMat.zw; float k = vMat.y;
+    if (k < 0.5) {
+      if (Ng.y < -0.5) {
+        float tube = exp(-pow((q.x - 0.3) / 0.13, 2.0)) + exp(-pow((q.x - 0.7) / 0.13, 2.0));
+        alb = vec3(0.7); emis = I * lc * (0.9 + 3.6 * tube) * smoothstep(0.0, 0.04, min(q.y, 1.0 - q.y));
+      } else { alb = vec3(0.42, 0.42, 0.4); gloss = 0.5; emis = I * lc * 0.06; }
+    } else if (k < 1.5) {
+      alb = vec3(0.8); emis = I * lc * (2.4 + 3.0 * max(0.0, 1.0 - length(q - 0.5) * 1.7));
+    } else {
+      if (Ng.y < -0.5) { float r = length(q - 0.5) * 2.0; alb = vec3(0.8, 0.78, 0.72); emis = I * lc * (2.2 + 1.8 * (1.0 - r * r)) * smoothstep(1.0, 0.8, r); }
+      else { alb = vec3(0.5, 0.36, 0.16); gloss = 0.9; }
+    }
   }
+  sAlb = alb; sTn = tn; sGloss = gloss; sEmis = emis;
+}
+#ifdef PLACES
+vec4 PA(vec2 uv, float l){ return texture(tPlace, vec3(uv, l)); }
+// normal from the array; walls are painted with canvas-down = world-down, so their v slope flips
+vec3 PN(vec2 uv, float l, bool wall){ vec3 n = texture(tPlaceN, vec3(uv, l)).xyz * 2.0 - 1.0; if (wall) n.y = -n.y; return n; }
+
+// Which place this point belongs to. a = its own cell, b = the other place across a border
+// within reach, t = how much of b shows (a ragged, noisy seam rather than the cell line),
+// fd = signed distance-ish to the seam (in cells).
+void placeAt(vec3 P, vec3 Ng, float u, bool soft, out float a, out float b, out float t, out float fd){
+  bool wall = abs(Ng.y) < 0.5;
+  // the border wanders: look the place up through a domain warp (along the wall for walls)
+  vec2 np = wall ? vec2(u, P.y) : P.xz, warp = vec2(0.0);
+  if (soft) {
+    if (wall) warp = vec2(-Ng.z, Ng.x) * ((texture(tNoise, np * 0.31 + 0.13).g - 0.5) + (texture(tNoise, np * 1.1 + 0.7).r - 0.5) * 0.6) * 1.7;
+    else warp = (vec2(texture(tNoise, np * 0.31 + 0.13).g, texture(tNoise, np * 0.31 + 0.57).g) - 0.5
+              + (vec2(texture(tNoise, np * 1.1).r, texture(tNoise, np * 1.1 + 0.4).r) - 0.5) * 0.6) * 1.7;
+  }
+  vec2 own = floor(P.xz / CS + warp + (wall ? Ng.xz * 0.5 : vec2(0.0)));
+  a = bioFetch(own); b = a; t = 0.0; fd = 1.0;
+  vec2 h = P.xz / CS + warp - 0.5 + (wall ? Ng.xz * 0.02 : vec2(0.0));
+  vec2 c = floor(h), f = h - c;
+  vec4 s = vec4(bioFetch(c), bioFetch(c + vec2(1.0, 0.0)), bioFetch(c + vec2(0.0, 1.0)), bioFetch(c + vec2(1.0, 1.0)));
+  if (a > 200.0) { a = min(min(s.x, s.y), min(s.z, s.w)); if (a > 200.0) a = 0.0; b = a; }
+  if (!soft) return;
+  // solid cells (255) have no finish: they drop out of the blend
+  vec4 open = vec4(lessThan(s, vec4(200.0)));
+  vec4 same = vec4(equal(s, vec4(a))) * open;
+  if (dot(same, vec4(1.0)) > dot(open, vec4(1.0)) - 0.5) return;
+  b = (open.x > 0.5 && same.x < 0.5) ? s.x : (open.y > 0.5 && same.y < 0.5) ? s.y : (open.z > 0.5 && same.z < 0.5) ? s.z : s.w;
+  vec4 wb = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y) * open;
+  float fa = dot(wb, same) / max(dot(wb, vec4(1.0)), 1e-4);
+  float n = texture(tNoise, np * 0.7).g * 0.55 + texture(tNoise, np * 2.3 + 0.37).a * 0.3 + texture(tNoise, np * 7.0 + 0.71).a * 0.15;
+  fa += (n - 0.5) * 1.15;
+  float w = 0.012 + 0.0015 * distance(P, cameraPosition);
+  fd = fa - 0.5;
+  t = smoothstep(0.5 + w, 0.5 - w, fa);
+}
+
+// The other places' floors, walls and ceilings (Level 0 is l0Surface).
+void placeSurf(float p){
+  bool fl = sMat < 0.5, ce = sMat > 0.5 && sMat < 1.5, riser = sMat > 2.5, wl = !fl && !ce;
+  vec2 pp = wl ? vec2(sU, vW.y) : vW.xz;               // noise plane
+  vec2 wp = (wl ? vec2(sU, -vW.y) : vW.xz) + sOff;     // texture plane
+  vec4 n0 = texture(tNoise, pp * 0.045), n1 = texture(tNoise, pp * 0.19 + 0.31);
+  vec3 alb = vec3(0.5); vec3 tn = vec3(0.0, 0.0, 1.0); float gloss = 0.1, wet = 0.0;
+  float hb = sHb, hc = sHc;
+  if (p < 2.5) {
+    // ---- Level 1 / Level 2: bare concrete ----
+    bool two = p > 1.5;
+    if (fl || riser) {
+      vec2 uv = wp / 3.0; vec4 t = PA(uv, 1.0); alb = t.rgb; tn = PN(uv, 1.0, wl);
+      vec2 uv2 = mat2(0.8, -0.6, 0.6, 0.8) * wp / 2.7 + 0.37;
+      alb = mix(alb, PA(uv2, 1.0).rgb, smoothstep(0.35, 0.65, n1.g) * 0.6);
+      alb *= 0.8 + 0.4 * n0.r;
+      // low spots hold water: damp halos round shallow puddles
+      float dm = n0.b + (n1.g - 0.5) * 0.35 + (texture(tNoise, pp * 0.9).a - 0.5) * 0.1;
+      float damp = smoothstep(0.5, 0.66, dm), pud = smoothstep(0.645, 0.675, dm) * (fl ? 1.0 : 0.0);
+      if (two) {
+        float rust = smoothstep(0.55, 0.8, n1.r);
+        alb *= vec3(0.6, 0.56, 0.5); alb = mix(alb, alb * vec3(1.4, 0.8, 0.48), rust * 0.6);
+        damp = max(damp, 0.45 * smoothstep(0.4, 0.7, n1.b));
+      }
+      alb *= mix(1.0, 0.55, damp); alb *= 1.0 - 0.22 * sEdge;
+      if (riser) alb *= 0.85;
+      tn.xy *= 1.0 - 0.92 * pud;
+      gloss = 0.12 + 0.3 * t.a + 0.3 * damp; wet = max(damp * 0.3, pud * 1.1);
+    } else if (ce) {
+      vec2 uv = wp / 2.4; alb = PA(uv, 8.0).rgb; tn = PN(uv, 8.0, false);
+      alb *= (0.8 + 0.35 * n0.r) * (two ? 0.4 : 0.8);
+      float st = smoothstep(0.6, 0.8, n1.b); alb = mix(alb, alb * vec3(0.75, 0.62, 0.45), st * 0.6);
+      gloss = 0.05;
+    } else {
+      vec2 uv = wp / 2.4; vec4 t = PA(uv, 0.0); alb = t.rgb; tn = PN(uv, 0.0, true);
+      alb *= 0.82 + 0.34 * n0.r; gloss = 0.1;
+      if (!two) {
+        // a painted dado, worn through to the concrete in places, and a yellow line at the floor
+        float chip = smoothstep(0.655, 0.675, texture(tNoise, pp * 0.83 + 0.21).g * 0.6 + texture(tNoise, pp * 2.9).r * 0.25 + n1.g * 0.2);
+        float band = (1.0 - smoothstep(1.19, 1.2, hb)) * (1.0 - chip);
+        alb = mix(alb, vec3(0.07, 0.1, 0.095) * (0.85 + 0.3 * n1.r), band);
+        float yl = (1.0 - smoothstep(0.095, 0.1, hb)) * (1.0 - chip * 0.8);
+        alb = mix(alb, vec3(0.6, 0.45, 0.07) * (0.85 + 0.3 * n1.a), yl * 0.9);
+        tn.xy *= 1.0 - 0.75 * max(band, yl); gloss = mix(0.1, 0.4, max(band, yl));
+        alb *= 1.0 - 0.35 * exp(-pow((hb - 1.2) / 0.005, 2.0));
+      } else {
+        // soot and heat towards the ceiling, rust bleeding down from the pipes
+        alb *= vec3(0.6, 0.56, 0.5) * mix(0.32, 1.0, smoothstep(0.0, 1.4, hc));
+        vec4 col0 = texture(tNoise, vec2(sU * 2.3, 0.13));
+        float rs = smoothstep(0.66, 0.86, col0.g) * smoothstep(0.3 + 2.2 * col0.r, 0.0, hc) * smoothstep(0.25, 0.75, texture(tNoise, vec2(sU * 7.0, vW.y * 0.5)).a + 0.2);
+        alb = mix(alb, vec3(0.24, 0.1, 0.035), rs * 0.75);
+        gloss = 0.12 + rs * 0.25;
+      }
+      alb *= mix(0.68, 1.0, smoothstep(0.0, 0.18 + 0.3 * n0.g, hb));
+      float streak = smoothstep(0.6, 0.85, texture(tNoise, vec2(sU * 1.7, vW.y * 0.04 + 0.5)).g) * smoothstep(2.4, 0.0, hc);
+      alb *= 1.0 - 0.3 * streak;
+    }
+  } else if (p < 3.5) {
+    // ---- Level 5: the hotel ----
+    if (fl || riser) {
+      vec2 uv = wp / 1.2; alb = PA(uv, 5.0).rgb; tn = PN(uv, 5.0, wl);
+      alb *= 0.8 + 0.35 * n0.r;
+      float soil = (1.0 - sEdge) * smoothstep(0.3, 0.7, n1.r);
+      float l = dot(alb, vec3(0.3, 0.5, 0.2));
+      alb = mix(alb, mix(vec3(l), alb, 0.6) * 0.8, soil * 0.65);
+      tn.xy *= 1.0 - 0.4 * soil; gloss = 0.04;
+      if (riser) alb *= 0.8;
+    } else if (ce) {
+      vec2 uv = wp / 1.2; alb = PA(uv, 9.0).rgb; tn = PN(uv, 9.0, false);
+      alb *= (0.85 + 0.2 * n0.r) * vec3(1.0, 0.94, 0.82);
+      float st = smoothstep(0.62, 0.7, n0.b + (n1.g - 0.5) * 0.3);
+      alb = mix(alb, alb * vec3(0.78, 0.6, 0.36), st * 0.7);
+      gloss = 0.06;
+    } else if (hb < 0.92) {
+      // walnut wainscot up to the chair rail
+      vec2 uv = vec2(sU / 1.2, clamp((0.92 - hb) / 0.92, 0.002, 0.998));
+      vec4 t = PA(uv, 4.0); alb = t.rgb; tn = PN(uv, 4.0, true);
+      alb *= 0.85 + 0.25 * n0.r; gloss = 0.25 + 0.45 * t.a;
+      alb *= mix(0.7, 1.0, smoothstep(0.0, 0.25, hb));
+    } else {
+      // flocked damask, hung in 0.6 m drops
+      float su = (sU + 0.11) / 0.6, sid = floor(su), sf = fract(su);
+      float hs = hash21(vec2(sid, sNg.x * 3.0 + sNg.z * 7.0 + 5.0));
+      vec2 uv = vec2(sU, -vW.y + (hs - 0.5) * 0.02) / 0.6; vec4 t = PA(uv, 3.0); alb = t.rgb; tn = PN(uv, 3.0, true);
+      alb *= 0.78 + 0.34 * n0.r + 0.08 * (hs - 0.5);
+      float ds = min(sf, 1.0 - sf) * 0.6;
+      alb *= 1.0 - 0.4 * smoothstep(0.0015, 0.0, ds);
+      tn.x += (sf < 0.5 ? 1.0 : -1.0) * smoothstep(0.005, 0.0, ds) * 0.4;
+      alb *= mix(0.6, 1.0, smoothstep(0.0, 0.9, hc));
+      float leak = smoothstep(0.6, 0.8, texture(tNoise, vec2(sU * 0.7, 0.37)).g) * smoothstep(1.6, 0.0, hc);
+      alb = mix(alb, alb * vec3(0.7, 0.55, 0.4), leak * 0.6);
+      gloss = 0.08 + 0.12 * t.a;
+    }
+  } else if (p < 4.5) {
+    // ---- Level 37: glazed white tile on every surface ----
+    vec2 uv = wp / 1.2; vec4 t = PA(uv, 2.0); alb = t.rgb; tn = PN(uv, 2.0, wl);
+    alb *= 0.93 + 0.12 * n0.r;
+    float grout = 1.0 - t.a;
+    alb *= 1.0 - grout * 0.3 * (wl ? 1.0 - smoothstep(0.0, 0.5, hb) : 0.4);
+    gloss = 0.08 + 0.5 * t.a; wet = t.a * (ce ? 0.2 : 0.6);
+  } else {
+    // ---- Level !: the hospital corridor ----
+    if (fl || riser) {
+      vec2 uv = wp / 2.0; vec4 t = PA(uv, 6.0); alb = t.rgb; tn = PN(uv, 6.0, wl);
+      alb *= 0.88 + 0.2 * n0.r; alb *= 1.0 - 0.18 * sEdge;
+      gloss = 0.3 + 0.3 * t.a; wet = 0.35 * t.a;
+    } else if (ce) {
+      l0Surface(); float l = dot(sAlb, vec3(0.33)); sAlb = vec3(l) * vec3(1.16, 1.2, 1.2); gWet = 0.0; return;
+    } else {
+      vec2 uv = wp / 1.2; vec4 t = PA(uv, 7.0); alb = t.rgb; tn = PN(uv, 7.0, true);
+      vec3 paint = hb < 0.9 ? vec3(0.66, 0.84, 0.78) : vec3(1.0, 0.98, 0.9);
+      alb *= paint * (0.9 + 0.15 * n0.r); gloss = 0.3;
+      // bumper rail
+      float rail = smoothstep(0.9, 0.904, hb) * (1.0 - smoothstep(1.046, 1.05, hb));
+      float rv = (hb - 0.975) / 0.075;
+      alb = mix(alb, vec3(0.5, 0.52, 0.5) * (0.9 + 0.2 * n1.a), rail);
+      tn = mix(tn, normalize(vec3(0.0, -rv * 0.9, 1.0)), rail); gloss = mix(gloss, 0.65, rail);
+      float sc = smoothstep(0.78, 0.9, texture(tNoise, vec2(sU * 2.3, hb * 4.0)).a) * smoothstep(0.8, 0.1, hb);
+      alb *= 1.0 - 0.3 * sc;
+    }
+  }
+  sAlb = alb; sTn = tn; sGloss = gloss; gWet = wet; sEmis = vec3(0.0);
+}
+// Trim in the other places: skirting / chair rail (4), wall angle / cornice (5), plates (8), casing (9)
+void placeTrim(float p){
+  bool hotel = p > 2.5 && p < 3.5, run = p > 4.5;
+  if (sMat > 3.5 && sMat < 4.5) {
+    vec4 n0 = texture(tNoise, vec2(sU, vW.y) * 1.3);
+    if (hotel) { sAlb = vec3(0.06, 0.034, 0.02) * (0.85 + 0.3 * n0.g); sGloss = 0.7; }
+    else if (run) { sAlb = vec3(0.3, 0.33, 0.32) * (0.9 + 0.2 * n0.g); sGloss = 0.45; }
+  } else if (sMat > 4.5 && sMat < 5.5) {
+    if (hotel) { sAlb = vec3(0.66, 0.62, 0.54) * (0.9 + 0.2 * texture(tNoise, vW.xz * 0.5 + vW.y).r); sGloss = 0.2; }
+    else if (run) sAlb = vec3(0.64, 0.65, 0.63);
+  } else if (sMat > 7.5 && sMat < 8.5) {
+    if (hotel) { sAlb *= vec3(0.9, 0.72, 0.42); sGloss = 0.9; }
+  } else if (sMat > 8.5 && sMat < 9.5) {
+    vec4 n0 = texture(tNoise, vec2(sU, vW.y) * 0.9);
+    if (hotel) { sAlb = vec3(0.065, 0.036, 0.022) * (0.85 + 0.3 * n0.r); sGloss = 0.65; }
+    else if (run) { sAlb = vec3(0.48, 0.52, 0.5) * (0.9 + 0.2 * n0.r); sGloss = 0.5; }
+  }
+}
+bool sBlend;
+void surfaceOf(float p){
+  gWet = 0.0;
+  if (p < 0.5 || p > 5.5) { l0Surface(); return; }
+  if (sBlend) { placeSurf(p); return; }
+  l0Surface(); placeTrim(p);
+}
+// Level 37: the floor seen through still water, caustics under it and on what is above it
+vec3 poolLight(vec3 col, float depth, vec3 V, vec3 Ng){
+  if (depth > 0.0) {
+    float path = depth / max(V.y, 0.2) + depth;
+    col *= exp(-vec3(0.75, 0.17, 0.1) * path);
+#if QUALITY > 0
+    col *= 0.78 + 1.3 * caustic(vW.xz * 0.9 + Ng.xz * vW.y) * smoothstep(0.0, 0.12, depth);
+#endif
+    return col;
+  }
+#if QUALITY > 0
+  vec2 own = floor(vW.xz / CS + (abs(Ng.y) < 0.5 ? Ng.xz * 0.5 : vec2(0.0)));
+  vec4 me = cellAt(own);
+  if (me.a < WATER_Y - 0.02 && me.a > -40.0) {
+    float h = vW.y - WATER_Y;
+    float k = Ng.y < -0.5 ? 0.22 : (abs(Ng.y) < 0.5 ? 0.5 * exp(-h * 1.1) : 0.0);
+    vec2 cp = Ng.y < -0.5 ? vW.xz * 0.8 : vec2(sU, vW.y) * 0.9;
+    col *= 1.0 + k * (caustic(cp) - 0.3);
+  }
+#endif
+  return col;
+}
+void main(){
+  vec3 Ng = normalize(vN); float mat = vMat.x;
+  vec3 V = normalize(cameraPosition - vW);
+  bool vert = abs(Ng.y) < 0.5;
+  vec3 T = vert ? (abs(Ng.x) > 0.5 ? vec3(0, 0, 1) : vec3(1, 0, 0)) : vec3(1, 0, 0);
+  vec3 B = vert ? vec3(0, 1, 0) : vec3(0, 0, 1);
+  float u = abs(Ng.x) > 0.5 ? vW.z : vW.x;
+  float edge;
+  gAO = worldAO(vW, Ng, edge);
+  sMat = mat; sNg = Ng; sU = u; sEdge = edge; sVert = vert; sOff = vec2(0.0); sHb = 0.0; sHc = 0.0;
+  float pa = 0.0, pb = 0.0, pt = 0.0, pf = 1.0, depth = 0.0;
+  sBlend = false;
+  if (uBioAny > 0.5) {
+    if (vert) { vec4 me = cellAt(floor(vW.xz / CS + Ng.xz * 0.5)); sHb = vW.y - (vMat.y > -900.0 ? vMat.y : me.a); sHc = me.g - vW.y; }
+    sBlend = mat < 3.5 && !(mat > 0.5 && mat < 1.5 && vMat.y < 6.5 && cellAt(floor(vW.xz / CS)).r > 0.5);
+    placeAt(vW, Ng, u, sBlend, pa, pb, pt, pf);
+    if (pt > 0.999) { pa = pb; pt = 0.0; }
+    // under the water of Level 37: what is below wobbles with the ripples
+    if (pa > 3.5 && pa < 4.5 && vW.y < WATER_Y - 0.004) {
+      depth = WATER_Y - vW.y;
+      if (V.y > 0.02) { vec3 Sx = vW + V * (depth / V.y); sOff = waveSlope(Sx.xz) * min(depth, 0.6) * 0.06; }
+    }
+  }
+  gPlace = pt > 0.5 ? pb : pa;
+  surfaceOf(pa);
+  vec3 alb = sAlb, tn = sTn, emis = sEmis; float gloss = sGloss, wet = gWet;
+  if (pt > 0.001) {
+    surfaceOf(pb);
+    alb = mix(alb, sAlb, pt); tn = mix(tn, sTn, pt); gloss = mix(gloss, sGloss, pt); wet = mix(wet, gWet, pt); emis = mix(emis, sEmis, pt);
+    // where one finish stops: a thin, dark, ragged line
+    alb *= 1.0 - 0.4 * exp(-pow(pf / 0.03, 2.0));
+  }
+  gWet = wet;
   vec3 N = normalize(T * tn.x * 0.9 + B * tn.y * 0.9 + Ng * tn.z);
   vec3 col = shade(vW, N, Ng, alb, gloss, V) + emis;
+  if (uBioAny > 0.5 && gPlace > 3.5 && gPlace < 4.5) col = poolLight(col, depth, V, Ng);
   gl_FragColor = vec4(fog(col, vW), 1.0);
 }
+#else
+// Level 0 only: exactly the pre-0.3 world shader
+void main(){
+  vec3 Ng = normalize(vN); float mat = vMat.x;
+  vec3 V = normalize(cameraPosition - vW);
+  bool vert = abs(Ng.y) < 0.5;
+  vec3 T = vert ? (abs(Ng.x) > 0.5 ? vec3(0, 0, 1) : vec3(1, 0, 0)) : vec3(1, 0, 0);
+  vec3 B = vert ? vec3(0, 1, 0) : vec3(0, 0, 1);
+  float u = abs(Ng.x) > 0.5 ? vW.z : vW.x;
+  float edge;
+  gAO = worldAO(vW, Ng, edge);
+  sMat = mat; sNg = Ng; sU = u; sEdge = edge; sVert = vert;
+  l0Surface();
+  vec3 N = normalize(T * sTn.x * 0.9 + B * sTn.y * 0.9 + Ng * sTn.z);
+  vec3 col = shade(vW, N, Ng, sAlb, sGloss, V) + sEmis;
+  gl_FragColor = vec4(fog(col, vW), 1.0);
+}
+#endif
 `;
 
 const OBJ_VS = /* glsl */`
@@ -609,8 +948,81 @@ void main(){
     emis *= lampFlicker(1.0, ph) * mix(1.0, step(0.5, hash11(floor(uTime * 13.0 + ph * 77.0))), step(0.93, hash11(floor(uTime * 0.6 + ph * 31.0)))) * max(uPulse, 0.03) * dk(vW.xz);
   }
 #endif
+#ifdef ALARM
+  emis *= alarmK();
+#endif
   col += emis;
   gl_FragColor = vec4(fog(col, vW), uAlpha);
+}
+`;
+// ---- water surface: mirrors the ceiling, its lamps and the tiled walls; the floor below shows through ----
+const WATER_VS = /* glsl */`
+varying vec3 vW;
+void main(){ vW = position; gl_Position = projectionMatrix * viewMatrix * vec4(position, 1.0); }
+`;
+const WATER_FS = /* glsl */`
+varying vec3 vW;
+uniform sampler2D tNoise;
+${LIGHT}
+${WATERFN}
+vec4 cellAt(vec2 c){ return texelFetch(uCell, ivec2(mod(c, MAPN)), 0); }
+vec3 mirror(vec3 P, vec3 R, out float dist){
+  vec4 me = cellAt(floor(P.xz / CS));
+  float tc = (me.g - P.y) / max(R.y, 0.03);
+  dist = tc;
+  // pools are Level 37; puddles (decor) take the colours of wherever they lie
+  float pl = uBioAny > 0.5 ? bioFetch(floor(P.xz / CS)) : 0.0; if (pl > 5.5) pl = 0.0;
+  vec3 lc = placeLight(pl) * uPulse;
+  vec3 TILEW = pl > 3.5 && pl < 4.5 ? vec3(0.8, 0.83, 0.82) : vec3(0.3, 0.29, 0.26);
+#if QUALITY > 0
+  // a wall in the way? march the reflected ray over the plan
+  for (int i = 1; i <= 6; i++) {
+    float t = tc * float(i) / 6.0;
+    vec3 X = P + R * t;
+    if (texture(uOcc, (X.xz / CS) / MAPN).r > 0.5) {
+      float ind = texture(uInd, ((X.xz - R.xz * 0.4) / CS) / MAPN).r;
+      dist = t;
+      return TILEW * (ind * ind * 2.5 * 0.6 + 0.03) * lc * dk(X.xz);
+    }
+  }
+#endif
+  vec3 Q = P + R * tc;
+  vec2 c = floor(Q.xz / CS), f = fract(Q.xz / CS);
+  vec4 info = cellAt(c);
+  float ind = texture(uInd, (Q.xz / CS) / MAPN).r;
+  vec3 col = TILEW * (ind * ind * 2.5 * 0.5 + 0.02) * lc * dk(Q.xz);
+  float ty = mod(info.r, 8.0);
+  if (ty > 0.5 && ty < 3.5) {
+    bool second = info.r > 7.5;
+    vec2 lc0 = second ? c - vec2(0.0, 1.0) : c;
+    vec4 i0 = second ? cellAt(lc0) : info;
+    float pv = second ? f.y + 1.0 : f.y;
+    float ex = min(f.x, 1.0 - f.x) * CS, ez = min(pv, 2.0 - pv) * CS;
+    float lens = smoothstep(-0.03, 0.12, ex) * smoothstep(-0.03, 0.12, ez);
+    col += lens * lampFlicker(ty, i0.b) * dk(Q.xz) * uPulse * placeLight(bioFetch(lc0)) * 2.4;
+  }
+  return col;
+}
+void main(){
+  vec3 V = normalize(cameraPosition - vW);
+  vec2 g = waveSlope(vW.xz);
+  // calmer with distance, so far water does not glitter
+  vec3 N = normalize(vec3(-g.x, 1.0 / 0.018 * (1.0 + 0.12 * distance(vW, cameraPosition)), -g.y));
+  float fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+  vec3 R = reflect(-V, N);
+  float dist;
+  vec3 col = mirror(vW, R, dist);
+  float d = distance(vW, cameraPosition) + dist;
+  float ff = max(1.0 - exp(-pow(d * uFogDen, 1.5)), smoothstep(uFogEnd.x, uFogEnd.y, d));
+  col = mix(col, fogColor(vW, d), ff);
+  if (uFlash > 0.001) {
+    vec3 L = uFlashPos - vW; float d2 = dot(L, L); vec3 Ld = L * inversesqrt(d2);
+    float cone = smoothstep(0.8, 0.97, dot(-Ld, uFlashDir));
+    col += FLASHCOL * pow(max(dot(N, normalize(Ld + V)), 0.0), 300.0) * cone * uFlash * 6.0 / (1.0 + 0.085 * d2);
+  }
+  // premultiplied: the reflection weighted by fresnel over the (already drawn) pool floor
+  float a = clamp(fres, 0.0, 1.0);
+  gl_FragColor = vec4(col * a, a);
 }
 `;
 const BACKDROP_VS = /* glsl */`
@@ -642,6 +1054,21 @@ void main(){
 }
 `;
 
+// Per-frame look of the air and the grade, read by render.js (smoothed by mats.atmos).
+// the water material, for decor puddles
+export const WATER = { mat: null };
+// shaders the renderer should compile ahead of first use (no hitch when a place comes into view)
+export const WARM = { list: [], pending: false };
+export const ATMOS = { uGrade: { value: new THREE.Vector3(1.06, 0.99, 0.8) }, uSatK: { value: 1.06 } };
+// per place: lamp colour x strength, bounce colour, final grade tint, saturation (Level 0 = the original look)
+const PLACE_LOOK = [
+  { k: 1.0, bounce: [1.0, 0.86, 0.46], grade: [1.06, 0.99, 0.8], sat: 1.06 },
+  { k: 1.5, bounce: [0.86, 0.9, 0.86], grade: [1.0, 1.0, 0.95], sat: 0.8 },
+  { k: 0.85, bounce: [1.0, 0.5, 0.26], grade: [1.06, 0.97, 0.86], sat: 1.0 },
+  { k: 0.8, bounce: [1.0, 0.6, 0.42], grade: [1.07, 0.97, 0.86], sat: 1.0 },
+  { k: 1.3, bounce: [1.25, 1.4, 1.44], grade: [1.03, 1.01, 0.98], sat: 0.95 },
+  { k: 1.6, bounce: [1.0, 0.2, 0.16], grade: [1.04, 0.98, 0.94], sat: 1.04 },
+];
 export function makeMaterials(tex, world, quality) {
   const V3 = () => new THREE.Vector3();
   const shared = {
@@ -653,24 +1080,42 @@ export function makeMaterials(tex, world, quality) {
     uFogCol: { value: new THREE.Vector3(0.62, 0.53, 0.25) }, uFogDen: { value: 1 / 36 },
     // haze: lamps near the player (filled by World), overall air density, torch beam strength
     uHz: { value: world.hz }, uHzN: world.hzN, uHaze: { value: 1 }, uHazeFlash: { value: 1 }, uFogEnd: world.fogEnd,
+    // places (0.3)
+    uBio: { value: world.texBio }, uBioAny: world.bioAny || { value: 0 },
+    uBioLight: { value: BIOMES.map((b, i) => new THREE.Vector3(...b.light).multiplyScalar(i ? PLACE_LOOK[i].k : 1)) },
+    uBioBounce: { value: PLACE_LOOK.map((p) => new THREE.Vector3(...p.bounce)) },
   };
-  const defines = () => ({ QUALITY: quality, SHADOW_STEPS: quality >= 2 ? 14 : 9 });
+  const defines = (places = true) => (places ? { QUALITY: quality, SHADOW_STEPS: quality >= 2 ? 14 : 9, PLACES: 1 } : { QUALITY: quality, SHADOW_STEPS: quality >= 2 ? 14 : 9 });
+  // two world shaders: the Level 0 one (unchanged, used wherever no other place is near) and
+  // the PLACES one, which World puts on sectors that have or touch another place
   const worldMat = new THREE.ShaderMaterial({
-    vertexShader: WORLD_VS, fragmentShader: WORLD_FS, defines: defines(),
-    uniforms: { ...shared, tWall: { value: tex.wall }, tWallN: { value: tex.wallN }, tCarpet: { value: tex.carpet }, tCarpetN: { value: tex.carpetN }, tCeil: { value: tex.ceil }, tCeilN: { value: tex.ceilN }, tNoise: { value: tex.noise } },
+    vertexShader: WORLD_VS, fragmentShader: WORLD_FS, defines: defines(false),
+    uniforms: { ...shared, tWall: { value: tex.wall }, tWallN: { value: tex.wallN }, tCarpet: { value: tex.carpet }, tCarpetN: { value: tex.carpetN }, tCeil: { value: tex.ceil }, tCeilN: { value: tex.ceilN }, tNoise: { value: tex.noise },
+      tPlace: { value: tex.place }, tPlaceN: { value: tex.placeN } },
   });
+  const worldP = worldMat.clone(); worldP.defines = defines(true); worldP.uniforms = worldMat.uniforms;
+  world.materialP = worldP;
+  // Level 37 water surface (World meshes it per sector)
+  const water = new THREE.ShaderMaterial({
+    vertexShader: WATER_VS, fragmentShader: WATER_FS, defines: defines(), uniforms: { ...shared, tNoise: { value: tex.noise } },
+    transparent: true, depthWrite: false, blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneMinusSrcAlphaFactor,
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+  });
+  world.waterMaterial = water; WATER.mat = water;
   // fog-coloured backdrop behind all geometry (see World.setBackdrop)
   const backdrop = new THREE.ShaderMaterial({
     vertexShader: BACKDROP_VS, fragmentShader: BACKDROP_FS, defines: defines(), uniforms: { ...shared },
     side: THREE.BackSide, depthTest: false, depthWrite: false,
   });
   if (world.setBackdrop) world.setBackdrop(backdrop);
-  const all = [worldMat, backdrop];
+  const all = [worldMat, worldP, backdrop, water];
+  WARM.list = [worldP, water];
   // obj(color, { gloss, fabric (= grime amount without VCOL), emis, emisScale, alpha, side,
   //   vtx: true (per-vertex aCol/aSurf + atlas), atlas, detail, bump, detScale, sheen, sss, sssCol, emisK,
-  //   map (sRGB baked texture) + mapSat, mapFlat, mapGain, mapEmis, mapTint, flicker (emissive follows the lamps) })
+  //   map (sRGB baked texture) + mapSat, mapFlat, mapGain, mapEmis, mapTint, flicker (emissive follows the lamps),
+  //   alarm (emissive swells with the Level ! alarm) })
   const obj = (color, o = {}) => {
-    const d = defines(); if (o.vtx) d.VCOL = 1; if (o.map) d.MAP = 1; if (o.flicker) d.FLICK = 1;
+    const d = defines(); if (o.vtx) d.VCOL = 1; if (o.map) d.MAP = 1; if (o.flicker) d.FLICK = 1; if (o.alarm) d.ALARM = 1;
     const m = new THREE.ShaderMaterial({
       vertexShader: OBJ2_VS, fragmentShader: OBJ_FS, defines: d,
       uniforms: {
@@ -694,14 +1139,33 @@ export function makeMaterials(tex, world, quality) {
     if (o.tintScale) m.uniforms.uTint.value.multiplyScalar(o.tintScale);
     all.push(m); return m;
   };
+  let fogBase = 1 / 44;
   const setQuality = (q) => {
     for (const m of all) { m.defines.QUALITY = q; m.defines.SHADOW_STEPS = q >= 2 ? 14 : 9; m.needsUpdate = true; }
+    WARM.pending = true;   // render.js compiles the place shaders in the background
     // draw distance and fog follow the tier: low keeps the old 46 m, medium and high see to 57 m
     if (world.setRange) world.setRange(q);
-    shared.uFogDen.value = q > 0 ? 1 / 44 : 1 / 36;
+    fogBase = q > 0 ? 1 / 44 : 1 / 36;
+    shared.uFogDen.value = fogBase * A.den;
+  };
+  // The air of the place the player is in, eased over a couple of seconds when a border is crossed.
+  // Level 0 targets are exactly the old constants.
+  const FOG0 = [0.62, 0.53, 0.25], L0F = BIOMES[0].fog;
+  const target = (id) => {
+    const b = BIOMES[id] || BIOMES[0], p = PLACE_LOOK[id] || PLACE_LOOK[0];
+    return { fog: FOG0.map((v, i) => Math.max(0, v + (b.fog[i] - L0F[i]) * 1.72)), haze: b.haze, den: id ? 0.75 + 0.25 * b.haze : 1, grade: p.grade, sat: p.sat };
+  };
+  const A = target(0); A.fog = A.fog.slice(); A.grade = A.grade.slice();
+  const atmos = (dt, bioId) => {
+    const T = target(bioId | 0), k = 1 - Math.exp(-Math.min(dt, 0.5) * 1.1);
+    for (let i = 0; i < 3; i++) { A.fog[i] += (T.fog[i] - A.fog[i]) * k; A.grade[i] += (T.grade[i] - A.grade[i]) * k; }
+    A.haze += (T.haze - A.haze) * k; A.den += (T.den - A.den) * k; A.sat += (T.sat - A.sat) * k;
+    shared.uFogCol.value.set(A.fog[0], A.fog[1], A.fog[2]);
+    shared.uHaze.value = A.haze; shared.uFogDen.value = fogBase * A.den;
+    ATMOS.uGrade.value.set(A.grade[0], A.grade[1], A.grade[2]); ATMOS.uSatK.value = A.sat;
   };
   setQuality(quality);
-  return { shared, world: worldMat, obj, decal, setQuality, all };
+  return { shared, world: worldMat, worldPlaces: worldP, water, obj, decal, setQuality, atmos, all };
 }
 
 // ---------- post ----------
@@ -733,6 +1197,7 @@ uniform sampler2D tScene; uniform sampler2D tBloom; uniform sampler2D tBlur; uni
 uniform vec2 uSrcTexel; uniform float uSharpen; uniform float uPostQ;
 uniform vec2 uRes; uniform float uTime; uniform float uExposure; uniform float uGrain; uniform float uVisor;
 uniform float uBreath; uniform float uCrack; uniform float uSanity; uniform float uDamage; uniform float uDead; uniform float uFade; uniform float uBlink;
+uniform vec3 uGrade; uniform float uSatK;
 float h21(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 vec2 h22(vec2 p){ return vec2(h21(p), h21(p + 19.19)); }
 float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0-2.0*f); return mix(mix(h21(i), h21(i+vec2(1,0)), f.x), mix(h21(i+vec2(0,1)), h21(i+vec2(1,1)), f.x), f.y); }
@@ -842,8 +1307,8 @@ void main(){
   col = aces(col);
   float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
   // grade: saturated mono-yellow (a touch of extra red keeps dark yellows off olive / green)
-  col = max(mix(vec3(l), col, 1.06 - 0.58 * ins - 0.62 * uDead), 0.0);
-  col *= vec3(1.06, 0.99, 0.8);
+  col = max(mix(vec3(l), col, uSatK - 0.58 * ins - 0.62 * uDead), 0.0);
+  col *= uGrade;
   col = pow(col, vec3(1.0 / 2.2));
   float vig = smoothstep(1.55, 0.35, length(p * vec2(0.9, 1.0)) + ins * 0.35);
   col *= mix(0.64, 1.0, vig);
