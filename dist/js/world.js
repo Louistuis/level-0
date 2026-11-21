@@ -6,7 +6,8 @@ import { genSector } from './worldgen.js';
 import { BIOME, BIOME_KEYS, WATER_Y } from './biomes.js';
 
 // Dev switch: ?place=level1 (any BIOMES key) renders every cell as that place, and bioAt reports it.
-export const PLACE = (() => { try { return BIOME_KEYS.indexOf(new URLSearchParams(location.search).get('place')); } catch (e) { return -1; } })();
+// Only on a developer's own machine: in the real game it would be a way to pick the calmest place.
+export const PLACE = (() => { try { return /^(localhost|127\.|\[::1\])/.test(location.host) ? BIOME_KEYS.indexOf(new URLSearchParams(location.search).get('place')) : -1; } catch (e) { return -1; } })();
 // place id of cell i of sector data d (0 = Level 0 when the generator has not set one)
 const bioOf = (d, i) => (PLACE >= 0 ? PLACE : d && d.bio ? d.bio[i] : 0);
 const anyBio = (d) => { if (PLACE > 0) return true; if (!d || !d.bio) return false; if (d._bioAny === undefined) d._bioAny = d.bio.some((v) => v > 0); return d._bioAny; };

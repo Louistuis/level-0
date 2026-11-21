@@ -18,7 +18,7 @@ import { CREDITS } from './assets.js';
 import { BIOME, BIOMES, biomeOf, ENTITIES, WATER_Y } from './biomes.js';
 import { S, SEC, SEC_M, MAPN, CEIL, ARTIFACTS, SIGNS, hash3, WORLD_SEED, clamp, damp, mod, sectorCode } from './util.js';
 
-const VERSION = '0.3.4';
+const VERSION = '0.3.5';
 // Voice is switched off. It is peer to peer: two players who talk learn each other's network address.
 // It comes back when the sound goes through a relay instead (see voice.js).
 const VOICE = false;
@@ -105,7 +105,26 @@ addEventListener('resize', resize); resize();
 
 // ---------- save ----------
 const saveKey = () => 'level0.save.' + (net ? net.kind : edition);
-function loadSave() { return LS.get(saveKey(), null); }
+// The save is whatever is in the browser's storage: every field is checked before the game leans on it,
+// and a save that cannot be read at all is the same as no save.
+function loadSave() {
+  try {
+    const v = LS.get(saveKey(), null); if (!v || typeof v !== 'object' || Array.isArray(v)) return null;
+    const n = (x, lo, hi, d) => (typeof x === 'number' && isFinite(x) && x >= lo && x <= hi ? x : d);
+    const obj = (o, max) => { const out = {}; let k = 0; if (o && typeof o === 'object' && !Array.isArray(o)) for (const key of Object.keys(o)) { if (++k > max) break; const val = o[key]; if (key.length <= 40 && typeof val === 'number' && isFinite(val)) out[key] = val; } return out; };
+    const st = v.stats && typeof v.stats === 'object' ? v.stats : {};
+    return {
+      pos: Array.isArray(v.pos) && v.pos.length === 4 && v.pos.every((x) => typeof x === 'number' && isFinite(x) && Math.abs(x) < 1e7) ? v.pos : null,
+      health: n(v.health, 0, 1, 1), sanity: n(v.sanity, 0, 1, 1), battery: n(v.battery, 0, 1, 1),
+      arts: Array.isArray(v.arts) ? [...new Set(v.arts.filter((k) => Number.isInteger(k) && k >= 0 && k < ARTIFACTS.length))] : [],
+      taken: obj(v.taken, 4000), visited: obj(v.visited, 20000),
+      places: Array.isArray(v.places) ? [...new Set(v.places.filter((k) => Number.isInteger(k) && k >= 0 && k < 64))].slice(0, 64) : [0],
+      met: Array.isArray(v.met) ? [...new Set(v.met.filter((k) => typeof k === 'string' && Object.hasOwn(ENTITIES, k)))] : [],
+      stats: { sectors: n(st.sectors, 0, 1e7, 0), escapes: n(st.escapes, 0, 1e6, 0), deaths: n(st.deaths, 0, 1e6, 0), far: n(st.far, 0, 1e7, 0) },
+      playT: n(v.playT, 0, 1e9, 0),
+    };
+  } catch (e) { return null; }
+}
 function writeSave(keepPos = true) {
   if (!net) return;
   try { LS.set('level0.mapcache', [...net.claims].slice(-3000).map(([k, c]) => [k, c.seed, c.by, c.mine ? 1 : 0])); } catch (e) { /* storage full */ }

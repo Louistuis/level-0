@@ -7,18 +7,22 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 
-const PORT = Number(process.env.PORT || 8791);
+// a limit that is misspelt in the environment falls back to its default: it never becomes "no limit"
+const int = (name, def, lo, hi) => { const v = Number(process.env[name]); return Number.isInteger(v) && v >= lo && v <= hi ? v : def; };
+const PORT = int('PORT', 8791, 1, 65535);
 const HOST = process.env.HOST || '127.0.0.1';
-const DATA = process.env.DATA || path.join(path.dirname(new URL(import.meta.url).pathname), 'data', 'level0.json');
-const MAX_CLIENTS = Number(process.env.MAX_CLIENTS || 200);
-const MAX_PER_IP = Number(process.env.MAX_PER_IP || 8);
+const DATA = process.env.DATA || path.join(path.dirname(fileURLToPath(import.meta.url)), 'data', 'level0.json');
+const MAX_CLIENTS = int('MAX_CLIENTS', 200, 1, 5000);
+const MAX_PER_IP = int('MAX_PER_IP', 8, 1, 1000);
 // Shared with the Worker in front (deploy/worker.js). Only a request that carries it may say which
 // address the player has; anybody else's X-Level0-IP is ignored.
 const KEY = process.env.LEVEL0_KEY || '';
 const KEY_HASH = crypto.createHash('sha256').update(KEY).digest();
 const VOICE = process.env.LEVEL0_VOICE === '1'; // the voice hand-shake is not passed on while voice is off in the game
+const BOOK_MAX = 20000;     // addresses each per-address book remembers at once
 const MSG_PER_S = 60;       // a game sends about 20 a second; far past that the connection is dropped
 const MAX_FRAME = VOICE ? 6000 : 3000; // bytes in one message (a full state is under 2000)
 const MAX_SECTORS = 100000; // rows the world file may hold; past that sectors are still playable, only not signed
@@ -108,7 +112,7 @@ const claimBudget = new Map(); // address -> { n: claims left, t: last refill, d
 function mayClaim(ip) {
   const t = Date.now(), day = Math.floor(t / DAY);
   let b = claimBudget.get(ip);
-  if (!b) { b = { n: CLAIM_BURST, t, day, used: 0 }; claimBudget.set(ip, b); }
+  if (!b) { if (claimBudget.size >= BOOK_MAX) return false; b = { n: CLAIM_BURST, t, day, used: 0 }; claimBudget.set(ip, b); }
   if (b.day !== day) { b.day = day; b.used = 0; }
   b.n = Math.min(CLAIM_BURST, b.n + (t - b.t) / 1000 * CLAIM_PER_S); b.t = t;
   if (b.n < 1 || b.used >= CLAIM_PER_DAY) return false;
@@ -131,8 +135,8 @@ const secOf = (x, z) => [Math.floor(x / SECTOR_M), Math.floor(z / SECTOR_M)];
 function tellSector(r, except) {
   const [kx, kz] = r.k.split(',').map(Number), o = JSON.stringify({ t: 'c', op: 'create', c: 'sector_v1', r: pubSector(r) });
   for (const p of clients.values()) {
-    if (p === except || !p.state || !ready(p)) continue;
-    const [sx, sz] = secOf(p.state.x, p.state.z);
+    if (p === except || !p.pos || !ready(p)) continue;
+    const [sx, sz] = secOf(p.pos.x, p.pos.z);
     if (Math.abs(sx - kx) <= NEAR_SECTORS && Math.abs(sz - kz) <= NEAR_SECTORS) { p.ws.send(o); p.sent.add(r.k); }
   }
 }
@@ -199,7 +203,11 @@ setInterval(() => { try { snapshot(); save(); } catch (e) { oops('save', e); } }
 const clients = new Map();
 const perIp = new Map();
 const rid = () => crypto.randomBytes(6).toString('base64url');
-const cleanName = (n) => { let s = String(n || '').replace(/[^\w \-]/g, '').trim().slice(0, 16); if (s.length < 2 || BAD.test(s)) s = 'guest-' + rid().slice(0, 4); return s; };
+// a name is judged as it reads, not as it is spelt: separators out, digits as the letters they stand for
+const plain = (n) => n.toLowerCase().replace(/[\s_\-]+/g, '').replace(/0/g, 'o').replace(/1/g, 'i').replace(/3/g, 'e').replace(/4/g, 'a').replace(/5/g, 's').replace(/7/g, 't');
+const RESERVED = /^(admin|administrator|mod|moderator|staff|owner|dev|developer|server|system|official|support|level0)$/;
+const badName = (s) => BAD.test(s) || BAD.test(plain(s)) || RESERVED.test(plain(s));
+const cleanName = (n) => { let s = String(n || '').replace(/[^\w \-]/g, '').trim().slice(0, 16); if (s.length < 2 || badName(s)) s = 'guest-' + rid().slice(0, 4); return s; };
 const num = (v, lo, hi) => (typeof v === 'number' && isFinite(v) && v >= lo && v <= hi);
 // a connection that does not read what it is sent is skipped, and cut off if it lets a lot pile up
 const ready = (c) => { if (c.ws.readyState !== 1) return false; const b = c.ws.bufferedAmount; if (b > 2097152) { c.ws.terminate(); return false; } return b < 262144; };
@@ -207,12 +215,14 @@ const send = (c, o) => { if (ready(c)) c.ws.send(JSON.stringify(o)); };
 const all = (o, except) => { const s = JSON.stringify(o); for (const c of clients.values()) if (c !== except && ready(c)) c.ws.send(s); };
 // A name that is on the leaderboard belongs to whoever put it there. Somebody else asking for it, or for
 // the name of a player who is online right now, gets a few characters added.
-const nameKey = (n) => n.toLowerCase().replace(/[\s_\-]+/g, '');
+// (look-alikes count as the same name: 0 and o, 1 and l and i, rn and m, vv and w)
+const nameKey = (n) => plain(n).replace(/[il]/g, 'l').replace(/rn/g, 'm').replace(/vv/g, 'w');
 function freeName(name, uid) {
   const k = nameKey(name);
-  // on the board the name is held by the row with the most sectors (the oldest, if they are level)
+  // on the board the name is held by the row with the most sectors (the oldest, if they are level),
+  // whether or not that row has a sector yet
   let best = null;
-  for (const r of db.stat) if ((r.sectors || 0) >= 1 && nameKey(r.username) === k && (!best || r.sectors > best.sectors || (r.sectors === best.sectors && String(r.created_at) < String(best.created_at)))) best = r;
+  for (const r of db.stat) if (nameKey(r.username) === k && (!best || r.sectors > best.sectors || (r.sectors === best.sectors && String(r.created_at) < String(best.created_at)))) best = r;
   let taken = !!best && best.uid !== uid;
   if (!taken && !best) for (const p of clients.values()) if (p.uid !== uid && nameKey(p.name) === k) { taken = true; break; }
   return taken ? name.slice(0, 11) + '-' + uid.slice(0, 4).replace(/[^A-Za-z0-9]/g, 'x') : name;
@@ -236,7 +246,7 @@ function cleanEnt(e) {
   if (!num(e[2], -1e7, 1e7) || !num(e[3], -100, 100) || !num(e[4], -1e7, 1e7) || !num(e[5], -1e4, 1e4) || typeof e[6] !== 'string' || e[6].length > 16) return null;
   const o = e.slice(0, 7);
   if (e.length > 7) o.push(num(e[7], -1e6, 1e6) ? e[7] : 0);
-  if (e.length > 8) o.push(typeof e[8] === 'string' ? e[8].replace(/[^\w \-]/g, '').slice(0, 16) : null);
+  if (e.length > 8) { const al = typeof e[8] === 'string' ? e[8].replace(/[^\w \-]/g, '').slice(0, 16) : null; o.push(al && !badName(al) ? al : null); }
   if (e.length > 9) o.push(e[9] ? 1 : 0);
   if (e.length > 10) o.push(Array.isArray(e[10]) && e[10].length === 4 && e[10].every((v) => Number.isInteger(v) && Math.abs(v) < 2e7) ? e[10] : null);
   if (e.length > 11) o.push(num(e[11], 0, 50) ? e[11] : 0);
@@ -289,13 +299,15 @@ function event(c, m) {
   const d = m.d; if (!d || typeof d !== 'object' || !c.state) return;
   if (d.k === 'scream') {
     // a death cry, from where the player is, to the players who could hear it
-    const t = Date.now(); if (t - (c.screamT || 0) < 4000) return; c.screamT = t;
-    const o = { t: 'e', from: c.id, d: { k: 'scream', x: c.state.x, y: c.state.y + 1.5, z: c.state.z } };
-    for (const p of clients.values()) if (p !== c && p.state && Math.hypot(p.state.x - c.state.x, p.state.z - c.state.z) < 80) send(p, o);
+    const t = Date.now(), at = c.pos; if (!at || c.passive || t < (c.holdT || 0) || t - (c.screamT || 0) < 4000) return; c.screamT = t;
+    const o = { t: 'e', from: c.id, d: { k: 'scream', x: at.x, y: c.state.y + 1.5, z: at.z } };
+    for (const p of clients.values()) if (p !== c && p.state && Math.hypot(p.state.x - at.x, p.state.z - at.z) < 80) send(p, o);
   } else if (d.k === 'rtc' && VOICE) {
     // voice chat hand-shake: one player to one nearby player, nothing but the hand-shake itself
     if (!okRate(c, 'rtc', 30) || typeof m.to !== 'string') return;
-    const p = clients.get(m.to); if (!p || p === c || !p.state || Math.hypot(p.state.x - c.state.x, p.state.z - c.state.z) > 70) return;
+    // both ends where they last stood alive, and not straight after a jump: a place that was only reported does not count
+    const p = clients.get(m.to), t = Date.now();
+    if (!p || p === c || !p.pos || !c.pos || c.passive || t < (c.holdT || 0) || c.state.a === 0 || Math.hypot(p.pos.x - c.pos.x, p.pos.z - c.pos.z) > 70) return;
     const str = (v, n) => typeof v === 'string' && v.length <= n;
     let o = null;
     if (d.bye) o = { k: 'rtc', bye: 1 };
@@ -310,15 +322,17 @@ function collection(c, m) {
   const name = m.c, d = m.d || {};
   if (name === 'sector_v1' && m.op === 'create') {
     if (typeof d.k !== 'string' || !/^-?\d{1,6},-?\d{1,6}$/.test(d.k) || !num(d.s, 0, 4294967295) || !c.state) return;
+    const [sx, sz] = d.k.split(',').map(Number);
+    if (sx + ',' + sz !== d.k) return; // one spelling per place: no "007,5", no "-0,5"
+    // Only somewhere you actually are, whether the row exists or not: who was where is told to the
+    // players who walk there, not to anybody who asks from the entry.
+    const at = c.pos; // where the player last stood, alive (not a place reported while down)
+    if (!at || c.passive || c.state.a === 0 || Math.abs(sx * SECTOR_M - at.x) > SECTOR_M * 4 || Math.abs(sz * SECTOR_M - at.z) > SECTOR_M * 4) return;
+    if (Date.now() < (c.holdT || 0)) return; // just teleported: the game asks again in a few seconds
     let r = sectorByK.get(d.k);
     if (!r) {
-      // only somewhere you actually are
-      const [sx, sz] = d.k.split(',').map(Number);
-      const at = c.pos; // where the player last stood, alive (not a place reported while down)
-      if (!at || c.passive || c.state.a === 0 || Math.abs(sx * SECTOR_M - at.x) > SECTOR_M * 4 || Math.abs(sz * SECTOR_M - at.z) > SECTOR_M * 4) return;
       // and only as many as load around someone who is really moving through the place. The seed is the
       // server's own: a client cannot hand in a different one and change what everybody sees there.
-      if (Date.now() < (c.holdT || 0)) return; // just teleported: the game asks again in a few seconds
       if (!mayClaim(c.ip)) { flag(c, 'claims'); return; }
       r = makeSector(c, d.k); if (!r) return;
       tellSector(r, c);
@@ -335,7 +349,7 @@ function collection(c, m) {
       if (walked(c) < SIGN_WALK || t < (c.holdT || 0) || t - (c.signT || 0) < 2000) { flag(c, 'sign'); return; }
       if (db.sign.filter((r) => Math.hypot(r.x - d.x, r.z - d.z) < 3).length >= SIGNS_NEAR) { flag(c, 'sign (too many in one spot)'); return; }
       const times = (signBudget.get(c.ip) || []).filter((x) => t - x < DAY);
-      if (times.length >= SIGNS_PER_DAY || times.filter((x) => t - x < 3600000).length >= SIGNS_PER_HOUR) { flag(c, 'sign (too many from one address)'); return; }
+      if (times.length >= SIGNS_PER_DAY || times.filter((x) => t - x < 3600000).length >= SIGNS_PER_HOUR || (!signBudget.has(c.ip) && signBudget.size >= BOOK_MAX)) { flag(c, 'sign (too many from one address)'); return; }
       times.push(t); signBudget.set(c.ip, times); c.signT = t;
       const mine = db.sign.filter((r) => r.uid === c.uid);
       if (mine.length >= 30) { const old = mine[0]; db.sign.splice(db.sign.indexOf(old), 1); all({ t: 'c', op: 'delete', c: name, id: old.id }); }
@@ -374,7 +388,7 @@ function statRow(c) {
   if (r) return r;
   if (c.walk < WALK_ROW) return null;
   const t = Date.now(), mine = (newRows.get(c.ip) || []).filter((x) => t - x < DAY);
-  if (mine.length >= NEW_ROWS_PER_IP) { flag(c, 'new names'); return null; }
+  if (mine.length >= NEW_ROWS_PER_IP || (!newRows.has(c.ip) && newRows.size >= BOOK_MAX)) { flag(c, 'new names'); return null; }
   mine.push(t); newRows.set(c.ip, mine);
   r = { id: rid(), uid: c.uid, created_at: new Date().toISOString(), username: c.name, sectors: 0, artifacts: 0, escapes: 0, deaths: 0, far: 0, walk: c.walk };
   db.stat.push(r); statByUid.set(c.uid, r); dirty = true;
@@ -398,7 +412,7 @@ function track(c, s) {
   const d = Math.hypot(s.x - p.x, s.z - p.z);
   c.allow = Math.min(V_MAX * 1.5, c.allow + V_MAX * (t - p.t) / 1000);
   if (d > c.allow + 0.6) { c.secK = ''; c.cell = -1; c.allow = 0; c.holdT = t + JUMP_HOLD; return; }
-  c.allow = Math.max(0, c.allow - d);
+  c.allow -= d; // may dip 0.6 m under zero: that slack is paid back before any more is given, not handed out with every report
   if (t < (c.holdT || 0)) return;
   // new ground only, one square at a time (squares kept as one number each; the oldest are let go)
   const cell = (Math.floor(s.x / CELL) + 4e6) * 8e6 + (Math.floor(s.z / CELL) + 4e6);
@@ -434,7 +448,8 @@ function enter(c, r, k) {
 }
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/health' || req.url === '/ws/health' || req.url === '/ws') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify({ ok: true, online: clients.size, sectors: db.sector.length, signs: db.sign.length })); return; }
+  if (req.url === '/health' || req.url === '/ws/health') { res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify({ ok: true, online: clients.size })); return; }
+  if (req.url === '/' || req.url === '/ws') { res.writeHead(426, { upgrade: 'websocket', 'content-type': 'text/plain' }); res.end('this is a WebSocket'); return; }
   res.writeHead(404); res.end();
 });
 // compared as two digests: always the same length, whatever bytes somebody puts in the header
@@ -463,11 +478,14 @@ function onConnection(ws, req) {
   // one network may hold a share of the places, and only a few of them once the server is nearly full
   const share = clients.size >= MAX_CLIENTS * 0.8 ? 4 : Math.min(MAX_PER_IP, Math.ceil(MAX_CLIENTS * 0.12));
   const now = Date.now(), recent = (connTimes.get(ip) || []).filter((x) => now - x < 60000);
-  if (clients.size >= MAX_CLIENTS || n > share || recent.length >= CONN_PER_MIN || connTimes.size > 20000) { ws.close(1013, 'full'); return; }
+  // (sockets that have not said hello yet count too; and when it is full, whoever has been silent
+  // longest, for a minute or more, gives their place to the newcomer)
+  if (clients.size >= MAX_CLIENTS && n <= share) { let old = null; for (const p of clients.values()) if (now - (p.lastT || p.t0) > 60000 && (!old || (p.lastT || p.t0) < (old.lastT || old.t0))) old = p; if (old) { clients.delete(old.id); all({ t: 'l', id: old.id }); old.id = null; old.ws.terminate(); } }
+  if (clients.size >= MAX_CLIENTS || wss.clients.size > MAX_CLIENTS + 40 || n > share || recent.length >= CONN_PER_MIN || connTimes.size > 20000) { ws.terminate(); return; }
   recent.push(now); connTimes.set(ip, recent);
   perIp.set(ip, n);
-  const c = { ws, ip, id: null, name: '', uid: '', state: null, changed: false, rate: {}, alive: true, pos: null, walk: 0, secK: '', cell: -1, cells: new Set(), entered: [], allow: 3, ents: new Map(), over: 0, sent: new Set(), areaK: '', flags: {} };
-  const hello = setTimeout(() => { if (!c.id) ws.close(); }, 8000);
+  const c = { ws, ip, id: null, name: '', uid: '', state: null, changed: false, rate: {}, alive: true, pos: null, walk: 0, secK: '', cell: -1, cells: new Set(), entered: [], allow: 3, ents: new Map(), over: 0, sent: new Set(), areaK: '', flags: {}, t0: now, lastT: 0 };
+  const hello = setTimeout(() => { if (!c.id) ws.terminate(); }, 8000);
   ws.on('pong', () => { c.alive = true; });
   ws.on('ping', () => { if (!okRate(c, 'ping', 3)) ws.terminate(); }); // browsers never send these
   ws.on('message', (buf) => { try { onMessage(buf); } catch (e) { oops('message', e); try { ws.terminate(); } catch { /* gone */ } } });
@@ -476,13 +494,13 @@ function onConnection(ws, req) {
     let m; try { m = JSON.parse(buf.toString()); } catch { return; }
     if (!m || typeof m !== 'object') return;
     if (!c.id) {
-      if (m.t !== 'hello' || typeof m.token !== 'string' || m.token.length < 16 || m.token.length > 64) return ws.close();
+      if (c.gone || m.t !== 'hello' || typeof m.token !== 'string' || m.token.length < 16 || m.token.length > 64) return ws.terminate();
       clearTimeout(hello);
       c.id = rid(); c.uid = crypto.createHash('sha256').update(m.token).digest('base64url').slice(0, 14); c.name = freeName(cleanName(m.name), c.uid);
       // One visit per player counts: when the same identity comes in again (a second tab, or a script
       // running many at once), the visits it already had stay connected but stop earning anything.
       for (const p of clients.values()) if (p.uid === c.uid) p.passive = true;
-      const peers = []; for (const p of clients.values()) peers.push([p.id, p.name, p.state]);
+      const peers = []; for (const p of clients.values()) peers.push([p.id, p.name, p.state ? rough(p.state) : null]);
       clients.set(c.id, c);
       const strip = (r) => { const { uid, a, ...rest } = r; return rest; };
       // the sectors around the entry now; the ones around wherever the player really is follow with their first position
@@ -494,13 +512,23 @@ function onConnection(ws, req) {
       all({ t: 'j', id: c.id, name: c.name }, c);
       return;
     }
-    if (m.t === 'p') { if (!okRate(c, 'p', 20)) return; const s = cleanState(m.s); if (s) { c.state = s; c.changed = true; c.json = null; track(c, s); if (s.e) s.e = entities(c, s.e); tellArea(c, s.x, s.z); } }
+    if (m.t === 'p') {
+      if (!okRate(c, 'p', 20)) return; const s = cleanState(m.s); if (!s) return;
+      track(c, s);
+      // A player who is down (dead, in a menu) stays where they last stood, and brings no creatures:
+      // the place in such a report is not a place anybody walked to.
+      if (s.a === 0) { const at = c.pos; s.x = at ? at.x : ENTRY[0]; s.z = at ? at.z : ENTRY[1]; delete s.e; }
+      c.state = s; c.changed = true; c.json = null; c.lastT = Date.now();
+      if (s.e) s.e = c.passive ? [] : entities(c, s.e);
+      if (c.pos && s.a !== 0 && !c.passive && Date.now() >= (c.holdT || 0)) tellArea(c, c.pos.x, c.pos.z);
+    }
     else if (m.t === 'e') { if (okRate(c, 'e', 40)) event(c, m); }
     else if (m.t === 'c') collection(c, m);
   };
   ws.on('close', () => {
     clearTimeout(hello);
     perIp.set(ip, (perIp.get(ip) || 1) - 1); if (perIp.get(ip) <= 0) perIp.delete(ip);
+    c.gone = true;
     if (c.id) { clients.delete(c.id); all({ t: 'l', id: c.id }); }
   });
   ws.on('error', () => {});
@@ -508,20 +536,22 @@ function onConnection(ws, req) {
 
 // presence fan-out: nearby players 10 times a second, everybody every 2 seconds. Each mover's state is
 // turned into text once a tick, not once per receiver, and its creatures go only to players near it.
+// Far away, a player is only "somewhere in that sector": enough for the map, not enough to follow them.
+const rough = (s) => ({ x: (Math.floor(s.x / SECTOR_M) + 0.5) * SECTOR_M, y: 0, z: (Math.floor(s.z / SECTOR_M) + 0.5) * SECTOR_M, w: 0, p: 0, f: 0, c: 0, a: s.a, n: 0, v: 0 });
 let tick = 0;
 setInterval(() => { try {
   tick++;
   const full = tick % 20 === 0;
   const moved = []; for (const c of clients.values()) if (c.state && (c.changed || full)) moved.push(c);
   if (!moved.length) return;
-  for (const m of moved) if (!m.json) { const { e, ...bare } = m.state; m.json = ['[' + JSON.stringify(m.id) + ',' + JSON.stringify(m.state) + ']', '[' + JSON.stringify(m.id) + ',' + JSON.stringify(bare) + ']']; }
+  for (const m of moved) if (!m.json) m.json = ['[' + JSON.stringify(m.id) + ',' + JSON.stringify(m.state) + ']', '[' + JSON.stringify(m.id) + ',' + JSON.stringify(rough(m.state)) + ']'];
   for (const c of clients.values()) {
     if (!ready(c)) continue;
     const u = [];
     for (const m of moved) {
       if (m === c) continue;
       const near = c.state && Math.abs(m.state.x - c.state.x) < AOI && Math.abs(m.state.z - c.state.z) < AOI;
-      if (near) u.push(m.json[0]); else if (full || !c.state) u.push(m.json[1]);
+      if (near) u.push(m.json[0]); else if (full) u.push(m.json[1]);
     }
     if (u.length) c.ws.send('{"t":"P","u":[' + u.join(',') + ']}');
   }

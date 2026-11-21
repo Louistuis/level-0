@@ -73,6 +73,7 @@ class WebsimTransport {
   }
 }
 
+const COLS = ['sector_v1', 'sign_v1', 'stat_v1']; // the three lists the server keeps; nothing else is taken from it
 class NordTransport {
   constructor(url, name) { this.kind = 'nord'; this.url = url; this.username = name; this.avatarUrl = ''; this.onEvent = () => {}; this._peers = new Map(); this.cols = {}; this.subs = {}; this.pending = new Map(); this.rid = 1; this.open = false; }
   init() {
@@ -97,13 +98,14 @@ class NordTransport {
     if (d.t === 'w') {
       this.id = d.id; this.username = d.name; this.open = true; this._peers.clear();
       for (const p of d.peers) this._peers.set(p[0], { username: p[1], s: p[2] || undefined });
-      for (const c in d.cols) { this.cols[c] = d.cols[c]; this._fire(c); }
+      for (const c of COLS) if (Array.isArray(d.cols && d.cols[c])) { this.cols[c] = d.cols[c]; this._fire(c); }
       if (this._last) this.setPresence(this._last);
     } else if (d.t === 'P') { for (const u of d.u) { const p = this._peers.get(u[0]); if (p) p.s = u[1]; } }
     else if (d.t === 'j') this._peers.set(d.id, { username: d.name, s: undefined });
     else if (d.t === 'l') this._peers.delete(d.id);
     else if (d.t === 'e') this.onEvent(d.from, d.d);
     else if (d.t === 'c') {
+      if (!COLS.includes(d.c) || (d.op !== 'delete' && (!d.r || typeof d.r !== 'object'))) return;
       const L = this.cols[d.c] || (this.cols[d.c] = []);
       if (d.op === 'create') { if (!L.some((r) => r.id === d.r.id)) L.unshift(d.r); }
       else if (d.op === 'update') { const i = L.findIndex((r) => r.id === d.r.id); if (i >= 0) L[i] = d.r; else L.unshift(d.r); }
@@ -280,7 +282,8 @@ export async function connect(opts) {
     try { tr = new WebsimTransport(); await tr.init(); } catch (e) { console.warn('websim transport failed', e); tr = null; }
   } else if (opts.edition === 'lou15' && !q.get('offline')) {
     const local = /^(localhost|127\.|\[::1\])/.test(location.host);
-    const url = q.get('ws') || (local ? 'ws://' + location.hostname + ':8791' : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
+    // (another server can only be named on a developer's own machine: a link must never send a player's identity somewhere else)
+    const url = (local && q.get('ws')) || (local ? 'ws://' + location.hostname + ':8791' : (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
     try { tr = new NordTransport(url, opts.name); await tr.init(); } catch (e) { console.warn('server unreachable, playing alone', e); tr = null; }
   }
   if (!tr) { tr = new OfflineTransport(opts.name); await tr.init(); }
