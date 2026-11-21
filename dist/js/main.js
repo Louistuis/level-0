@@ -18,7 +18,7 @@ import { CREDITS } from './assets.js';
 import { BIOME, BIOMES, biomeOf, ENTITIES, WATER_Y } from './biomes.js';
 import { S, SEC, SEC_M, MAPN, CEIL, ARTIFACTS, SIGNS, hash3, WORLD_SEED, clamp, damp, mod, sectorCode } from './util.js';
 
-const VERSION = '0.3.2';
+const VERSION = '0.3.3';
 const REPO = 'https://github.com/Louistuis/level-0';
 const DONATE = 'https://www.buymeacoffee.com/louis9987';
 const Q = new URLSearchParams(location.search);
@@ -514,7 +514,9 @@ function step(dt) {
   if (playing && G.saveT <= 0) {
     G.saveT = 2;
     if (G.alive) writeSave();
-    signs.sync(net.signs.filter((r) => Math.hypot(r.x - pl.x, r.z - pl.z) < 70 && !world.solidAt(r.x, r.z) && Math.abs(world.floorAt(r.x, r.z) - (r.y || 0)) < 0.5), SIGN_IDS); // marks from before a layout change may sit in a wall or over a pit: not drawn
+    let nearSigns = net.signs.filter((r) => Math.hypot(r.x - pl.x, r.z - pl.z) < 70 && !world.solidAt(r.x, r.z) && Math.abs(world.floorAt(r.x, r.z) - (r.y || 0)) < 0.5);
+    if (nearSigns.length > 150) nearSigns = nearSigns.map((r) => [Math.hypot(r.x - pl.x, r.z - pl.z), r]).sort((a, b) => a[0] - b[0]).slice(0, 150).map((x) => x[1]); // a wall of chalk is drawn as its nearest marks
+    signs.sync(nearSigns, SIGN_IDS); // marks from before a layout change may sit in a wall or over a pit: not drawn
     if (G.voice && G.voice.enabled) { const near = []; for (const [id, r] of ents.players) near.push({ id, d: r.d, x: r.x, y: r.y, z: r.z, v: (net.peers().get(id) || {}).s && net.peers().get(id).s.v }); G.voice.update(near); }
     refreshLists();
   }

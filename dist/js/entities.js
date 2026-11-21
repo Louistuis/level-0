@@ -26,6 +26,7 @@ const HOSTILE = new Set(['L', 'H', 'B', 'M', 'K']);
 const AUD = (c) => (ENTITIES[c] ? ENTITIES[c].audio : 'longarm');
 // player speeds (player.js): walk 2.15, sprint 4.7 for 7.5 s of stamina, crouch 1.05
 const SPRINT = 4.7;
+const REMOTE_V = 8, HORDE_V = 4.6; // the fastest a creature (6 m/s) and the horde (0.92 of a sprint) move, with a little room
 const DMG = { L: 0.5, H: 0.65, B: 0.6, M: 0.55, K: 0.45, W: 0.35 };
 // what the death screen says (sentence style)
 export const CAUSE = {
@@ -72,8 +73,15 @@ export class Entities {
   syncPlayers(peers, dt, cam) {
     const u = this.shared;
     const lights = [];
+    // a crowd is drawn as its nearest 32: no number of visitors (or of made-up ones) can bury the frame rate
+    let shown = null;
+    if (peers.size > 32) {
+      const near = [];
+      for (const [id, p] of peers) { const s = p.s; if (s && Number.isFinite(s.x) && Number.isFinite(s.z)) near.push([Math.hypot(s.x - cam.position.x, s.z - cam.position.z), id]); }
+      near.sort((a, b) => a[0] - b[0]); shown = new Set(near.slice(0, 32).map((n) => n[1]));
+    }
     for (const [id, p] of peers) {
-      const s = p.s; if (!s || s.x === undefined) continue;
+      const s = p.s; if (!s || !Number.isFinite(s.x) || !Number.isFinite(s.y) || !Number.isFinite(s.z) || (shown && !shown.has(id))) continue;
       let r = this.players.get(id);
       if (!r) {
         r = { obj: makeSuit(this.M, false), tag: makeTag(p.username || 'someone'), x: s.x, y: s.y, z: s.z, yaw: s.w || 0, sp: 0, name: p.username, vx: 0, vz: 0 };
@@ -95,7 +103,7 @@ export class Entities {
       r.tag.material.opacity = r.alive ? clamp((9 - d) / 3, 0, 1) : 0;
       if (r.flash && r.alive && d < 45) lights.push(r);
     }
-    for (const [id, r] of this.players) if (!peers.has(id)) { this.scene.remove(r.obj); r.tag.material.map.dispose(); this.players.delete(id); }
+    for (const [id, r] of this.players) if (!peers.has(id) || (shown && !shown.has(id))) { this.scene.remove(r.obj); r.tag.material.map.dispose(); this.players.delete(id); }
     lights.sort((a, b) => a.d - b.d);
     for (let k = 0; k < 3; k++) {
       const r = lights[k];
@@ -533,6 +541,18 @@ export class Entities {
   }
 
   // ---------- R: the horde (Level !) ----------
+  // is this corridor one the level really has? (looked up around both of its ends)
+  _realRun(run, key) {
+    if (this.testRun && this._runGeo(this.testRun).key === key) return true;
+    for (const [cx, cz] of [[run.x0, run.z0], [run.x1, run.z1]]) {
+      const sx0 = Math.floor(cx / 48), sz0 = Math.floor(cz / 48);
+      for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+        const s = this.world.sec(sx0 + dx, sz0 + dz), r = s && s.data && s.data.run;
+        if (r && this._runGeo(r).key === key) return true;
+      }
+    }
+    return false;
+  }
   _findRun(pl) {
     if (this.testRun) return this.testRun;
     const sx0 = Math.floor(pl.x / (S * 48)), sz0 = Math.floor(pl.z / (S * 48));
@@ -811,7 +831,8 @@ export class Entities {
     const me = T[0], all = [...this.mine, ...this.remote.values()];
     // A creature from somebody else's game can only hurt once it has behaved like one here: seen for a few
     // seconds, and seen at a distance first. One that is simply put on top of a player never gets there.
-    const real = (m) => m.own || ((m.age || 0) >= 3 && (m.maxD || 0) >= 10);
+    const real = (m) => m.own || ((m.age || 0) >= 3 && (m.maxD || 0) >= 10 && (m.type !== 'R' || m.runOk));
+    let drained = false; // what other players' creatures take from your nerves does not add up
     const hit = (m, d, reach) => { if ((m.st === 'hit') && d < reach && this.hitCd <= 0 && game.alive && real(m)) { this.hitCd = 1.2; game.hurt(DMG[m.type] || 0.4, CAUSE[m.type], m.x, m.z); } };
     for (const m of all) {
       const d = Math.hypot(m.x - pl.x, m.z - pl.z);
@@ -843,7 +864,8 @@ export class Entities {
         if ((m.st === 'atk' || m.st === 'hit') && d < 1.5) hit({ ...m, st: 'hit' }, d, 1.5);
       } else if (m.type === 'B') {
         const rad = m.rad || 7.5;
-        if (m.st !== 'fade' && d < darkD) { darkD = d; dark = m; }
+        const smiles = m.own || (real(m) && m.age < 120); // somebody else's Smiler: only a believable one, and not for ever
+        if (m.st !== 'fade' && d < darkD && smiles) { darkD = d; dark = m; }
         const stare = m.st === 'stare' ? 1 : 0, rush = m.st === 'rush' ? 1 : 0;
         animSmiler(m.obj, dt, m.st === 'fade' ? 0.6 : rush ? 1.45 : m.st === 'drawn' ? 1.25 : 1, stare);
         m.obj.position.y = this.world.floorAt(m.x, m.z) + 1.55;
@@ -852,7 +874,7 @@ export class Entities {
         m.obj.scale.setScalar(Math.max(0.001, m.fv));
         this.audio.entity(m.id, AUD('B'), m.x, m.obj.position.y, m.z, { near: clamp(1 - d / (rad * 2), 0, 1), moving: m.st === 'drift' || m.st === 'drawn' || rush ? 1 : 0, seen: m.st === 'drawn' || rush ? 1 : 0, chase: m.st === 'drawn' ? 0.6 : rush ? 1 : stare ? 0.15 : 0.05, rush, stare, attack: m.st === 'hit' });
         if (stare && d < 12) this._hush(dt);
-        if (d < rad * 1.5) { fear = Math.max(fear, 0.45 + 0.45 * (1 - d / (rad * 1.5))); game.drain(dt * 0.04); }
+        if (d < rad * 1.5) { fear = Math.max(fear, 0.45 + 0.45 * (1 - d / (rad * 1.5))); if (m.own) game.drain(dt * 0.04); else if (smiles && !drained) { drained = true; game.drain(dt * 0.04); } }
         else if (iSee) fear = Math.max(fear, 0.35);
         if (iSee) watching = true;
         hit(m, d, 1.6);
@@ -887,7 +909,7 @@ export class Entities {
         animFaceling(m.obj, dt, spd, angDiff(m.yaw, toMe), m.hv);
         this.audio.entity(m.id, AUD('W'), m.x, m.y + 1.6, m.z, { moving: spd > 0.2 ? 1 : 0, near, stare: iSee ? 1 : 0, chase: m.hv, rush: m.hv > 0.5 ? 1 : 0, attack: m.st === 'hit', seen: 1 });
         if (iSee && d < 12 && m.hv < 0.5) this._hush(dt);
-        if (iSee) { watching = true; game.drain(dt * 0.008 * clamp(1.4 - d / 30, 0.3, 1)); fear = Math.max(fear, clamp(0.55 - d / 50, 0.2, 0.55)); }
+        if (iSee) { watching = true; if (m.own || (real(m) && !drained)) { if (!m.own) drained = true; game.drain(dt * 0.008 * clamp(1.4 - d / 30, 0.3, 1)); } fear = Math.max(fear, clamp(0.55 - d / 50, 0.2, 0.55)); }
         if (m.hv > 0.5) fear = Math.max(fear, 0.9);
         hit(m, d, 1.6);
       } else if (m.type === 'R') {
@@ -929,39 +951,65 @@ export class Entities {
 
   // creatures simulated by other clients
   syncRemote(peers, dt) {
-    const seen = new Set();
-    for (const [, p] of peers) {
+    const seen = new Set(), tn = performance.now() / 1000;
+    if (!this._fresh) this._fresh = new Map(); // player -> [since, creatures first seen since]
+    for (const [pid, p] of peers) {
       const all = p.s && p.s.e; if (!Array.isArray(all)) continue;
       const list = all.length > 8 ? all.slice(0, 8) : all; // nobody's game runs more than a handful
       for (const e of list) {
+        try {
         if (!Array.isArray(e) || !KNOWN.has(e[1])) continue; // types from a newer (or older) version: ignore
         if (typeof e[0] !== 'string' || ![e[2], e[3], e[4], e[5]].every(Number.isFinite) || typeof e[6] !== 'string') continue;
-        const id = e[0]; seen.add(id);
+        // a creature stays around the player whose game runs it
+        if (e[1] !== 'R' && Math.hypot(e[2] - p.s.x, e[4] - p.s.z) > 150) continue;
+        const id = e[0];
         let m = this.remote.get(id);
+        if (m && (m.owner !== pid || m.type !== e[1])) continue; // somebody else's creature under the same name
         if (!m) {
-          m = { id, type: e[1], x: e[2], y: e[3], z: e[4], yaw: e[5], st: e[6], own: false, rad: 7.5, alias: typeof e[8] === 'string' ? e[8] : null, reveal: e[9] ? 1 : 0 };
-          if (m.type === 'R') { if (!Array.isArray(e[10])) continue; m.run = { x0: e[10][0], z0: e[10][1], x1: e[10][2], z1: e[10][3] }; m.runKey = this._runGeo(m.run).key; }
+          // and nobody's game makes new ones faster than this
+          if (e[1] === 'R' && (!Array.isArray(e[10]) || e[10].length !== 4 || !e[10].every(Number.isInteger))) continue;
+          let f = this._fresh.get(pid); if (!f || tn - f[0] > 5) { f = [tn, 0]; this._fresh.set(pid, f); }
+          if (++f[1] > 8) continue;
+          m = { id, owner: pid, type: e[1], x: e[2], y: e[3], z: e[4], yaw: e[5], st: e[6].slice(0, 16), own: false, rad: 7.5, alias: typeof e[8] === 'string' ? e[8].slice(0, 16) : null, reveal: e[9] ? 1 : 0, rx: e[2], rz: e[4], rt: tn, allow: 1 };
+          if (m.type === 'R') { m.run = { x0: e[10][0], z0: e[10][1], x1: e[10][2], z1: e[10][3] }; m.runKey = this._runGeo(m.run).key; }
           try { this._build(m); } catch (err) { console.warn('remote entity', err); continue; }
           this.remote.set(id, m);
+        }
+        seen.add(id);
+        // It may only move the way a creature moves: an allowance that fills at creature speed. One that
+        // covers ground faster than that has to earn its teeth again (see _draw).
+        if (m.type !== 'R' && (e[2] !== m.rx || e[4] !== m.rz)) {
+          const step = Math.hypot(e[2] - m.rx, e[4] - m.rz);
+          m.allow = Math.min(REMOTE_V * 0.6, m.allow + REMOTE_V * (tn - m.rt)); // it cannot save up for a lunge
+          if (step > m.allow + 0.25) { m.age = 0; m.allow = 0; } else m.allow = Math.max(0, m.allow - step);
+          m.rx = e[2]; m.rz = e[4]; m.rt = tn;
         }
         // eased toward the latest update; the speed the legs use is the speed it really moves at
         const ox = m.x, oz = m.z, oy = m.yaw;
         m.x = damp(m.x, e[2], 8, dt); m.y = damp(m.y, e[3], 8, dt); m.z = damp(m.z, e[4], 8, dt);
-        if (Math.hypot(e[2] - m.x, e[4] - m.z) > 8) { m.x = e[2]; m.z = e[4]; m.age = 0; m.maxD = 0; } // it jumped: it has to earn its teeth again (see _draw)
-        m.yaw += angDiff(m.yaw, e[5]) * (1 - Math.exp(-8 * dt)); m.st = e[6];
+        if (Math.hypot(e[2] - m.x, e[4] - m.z) > 8) { m.x = e[2]; m.z = e[4]; }
+        m.yaw += angDiff(m.yaw, e[5]) * (1 - Math.exp(-8 * dt)); m.st = e[6].slice(0, 16);
         const id2 = Math.max(dt, 1e-3);
         m.rv = damp(m.rv || 0, Math.min(8, Math.hypot(m.x - ox, m.z - oz) / id2), 6, dt);
         m.turn = damp(m.turn || 0, angDiff(oy, m.yaw) / id2, 6, dt);
-        if (typeof e[7] === 'number') m.k = e[7];
-        if (m.type === 'M') { if (typeof e[8] === 'string') m.alias = e[8]; m.reveal = e[9] ? 1 : 0; }
+        if (typeof e[7] === 'number' && Number.isFinite(e[7])) m.k = e[7];
+        if (m.type === 'M') { if (typeof e[8] === 'string') m.alias = e[8].slice(0, 16); m.reveal = e[9] ? 1 : 0; }
         if (m.type === 'R') {
-          // the horde's front may only advance the way a horde runs: a front that leaps forward is not believed
-          const ns = Number.isFinite(e[7]) ? e[7] : m.s, tn = performance.now() / 1000;
-          if (m.s !== undefined && ns !== m.s) { if (ns - m.s > 7 * Math.max(0.05, tn - (m.sT || tn)) + 1.5) { m.age = 0; m.maxD = 0; } m.sT = tn; }
-          else if (m.sT === undefined) m.sT = tn;
-          m.s = ns; m.v = Number.isFinite(e[11]) ? e[11] : m.v; m.fadeT = m.st === 'fade' ? (m.fadeT || 0) + dt : 0; m.x = e[2]; m.z = e[4]; }
+          // the horde's front may only advance the way a horde runs, along a corridor that is really there
+          const ns = Number.isFinite(e[7]) ? e[7] : m.s;
+          if (m.s === undefined) { m.sT = tn; m.sAllow = 0; }
+          else if (ns !== m.s) {
+            m.sAllow = Math.min(HORDE_V * 0.6, m.sAllow + HORDE_V * (tn - m.sT));
+            if (ns - m.s > m.sAllow + 0.25) { m.age = 0; m.sAllow = 0; } else if (ns > m.s) m.sAllow = Math.max(0, m.sAllow - (ns - m.s));
+            m.sT = tn;
+          }
+          if (!m.runOk && tn - (m.runT || -9) > 1) { m.runT = tn; m.runOk = this._realRun(m.run, m.runKey); }
+          m.s = ns; m.v = Number.isFinite(e[11]) ? e[11] : m.v; m.fadeT = m.st === 'fade' ? (m.fadeT || 0) + dt : 0; m.x = e[2]; m.z = e[4];
+        }
+        } catch (err) { /* one bad creature does not stop the others, or the frame */ }
       }
     }
+    if (this._fresh.size > 400) this._fresh.clear();
     for (const [id, m] of this.remote) if (!seen.has(id)) { this._remove(m); this.remote.delete(id); }
   }
   // [id, type, x, y, z, yaw, state, k, alias, reveal, run, v]

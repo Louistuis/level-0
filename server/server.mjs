@@ -14,6 +14,10 @@ const HOST = process.env.HOST || '127.0.0.1';
 const DATA = process.env.DATA || path.join(path.dirname(new URL(import.meta.url).pathname), 'data', 'level0.json');
 const MAX_CLIENTS = Number(process.env.MAX_CLIENTS || 200);
 const MAX_PER_IP = Number(process.env.MAX_PER_IP || 8);
+// Shared with the Worker in front (deploy/worker.js). Only a request that carries it may say which
+// address the player has; anybody else's X-Level0-IP is ignored.
+const KEY = process.env.LEVEL0_KEY || '';
+const MSG_PER_S = 150;      // a game sends about 20 a second; far past that the connection is dropped
 const SECTOR_M = 28.8, AOI = 130;
 const BAD = /n[i1]gg|f[a4]gg|h[i1]tler|k[i1]ke|r[a4]pe|c[u\*]nt|naz[i1]/i;
 
@@ -92,7 +96,7 @@ const signBudget = new Map(); // address -> [times of the signs it placed in the
 // Creatures a player's game is simulating are shown to the others only when they behave like creatures:
 // near their owner, moving no faster than a creature can, having existed for a few seconds, and not
 // appearing next to somebody else. One that jumps starts again from nothing.
-const ENT_RANGE = 150, ENT_V = 14, ENT_AGE = 3000, ENT_CLEAR = 12, CELL_M = 0.6, HORDE_V = 5.5;
+const ENT_RANGE = 150, ENT_V = 8, ENT_AGE = 3000, ENT_CLEAR = 12, CELL_M = 0.6, HORDE_V = 4.6; // creatures reach 6 m/s, the horde 0.92 of a sprint
 const CONN_PER_MIN = 30;
 const connTimes = new Map(); // address -> times of its recent connections
 const pubStat = (r) => { const { uid, walk, ...rest } = r; return rest; };
@@ -110,8 +114,22 @@ const perIp = new Map();
 const rid = () => crypto.randomBytes(6).toString('base64url');
 const cleanName = (n) => { let s = String(n || '').replace(/[^\w \-]/g, '').trim().slice(0, 16); if (s.length < 2 || BAD.test(s)) s = 'guest-' + rid().slice(0, 4); return s; };
 const num = (v, lo, hi) => (typeof v === 'number' && isFinite(v) && v >= lo && v <= hi);
-const send = (c, o) => { if (c.ws.readyState === 1 && c.ws.bufferedAmount < 262144) c.ws.send(JSON.stringify(o)); };
-const all = (o, except) => { const s = JSON.stringify(o); for (const c of clients.values()) if (c !== except && c.ws.readyState === 1) c.ws.send(s); };
+// a connection that does not read what it is sent is skipped, and cut off if it lets a lot pile up
+const ready = (c) => { if (c.ws.readyState !== 1) return false; const b = c.ws.bufferedAmount; if (b > 2097152) { c.ws.terminate(); return false; } return b < 262144; };
+const send = (c, o) => { if (ready(c)) c.ws.send(JSON.stringify(o)); };
+const all = (o, except) => { const s = JSON.stringify(o); for (const c of clients.values()) if (c !== except && ready(c)) c.ws.send(s); };
+// A name that is on the leaderboard belongs to whoever put it there. Somebody else asking for it, or for
+// the name of a player who is online right now, gets a few characters added.
+const nameKey = (n) => n.toLowerCase().replace(/[\s_\-]+/g, '');
+function freeName(name, uid) {
+  const k = nameKey(name);
+  // on the board the name is held by the row with the most sectors (the oldest, if they are level)
+  let best = null;
+  for (const r of db.stat) if ((r.sectors || 0) >= 1 && nameKey(r.username) === k && (!best || r.sectors > best.sectors || (r.sectors === best.sectors && String(r.created_at) < String(best.created_at)))) best = r;
+  let taken = !!best && best.uid !== uid;
+  if (!taken && !best) for (const p of clients.values()) if (p.uid !== uid && nameKey(p.name) === k) { taken = true; break; }
+  return taken ? name.slice(0, 11) + '-' + uid.slice(0, 4).replace(/[^A-Za-z0-9]/g, 'x') : name;
+}
 
 function okRate(c, key, perSec) {
   const t = Date.now(), b = c.rate[key] || (c.rate[key] = { n: 0, t });
@@ -152,17 +170,19 @@ function entPoint(e) {
 function entities(c, list) {
   const t = Date.now(), out = [], seen = new Set(), held = t < (c.holdT || 0);
   for (const e of list) {
+    // an id is its owner's: nobody can speak for a creature in somebody else's game
+    if (!e[0].startsWith(c.id + '.')) e[0] = c.id + '.' + e[0].replace(/[^\w.\-]/g, '').slice(0, 24);
     const id = e[0]; if (seen.has(id)) continue; seen.add(id);
     const p = entPoint(e); if (!p) continue;
     if (Math.hypot(p[0] - c.state.x, p[1] - c.state.z) > ENT_RANGE) { c.ents.delete(id); continue; }
     let k = c.ents.get(id);
     const vmax = e[1] === 'R' ? HORDE_V : ENT_V;
     if (k && k.type === e[1] && k.run === p[2]) {
-      k.allow = Math.min(vmax * 1.5, k.allow + vmax * (t - k.t) / 1000);
+      k.allow = Math.min(vmax * 0.75, k.allow + vmax * (t - k.t) / 1000); // it cannot save up for a lunge
       const d = Math.hypot(p[0] - k.x, p[1] - k.z);
-      if (d > k.allow + 1) k = null; else k.allow = Math.max(0, k.allow - d);
+      if (d > k.allow + 0.25) k = null; else k.allow = Math.max(0, k.allow - d); // the allowance pays for every metre: no free slack per report
     } else k = null;
-    if (!k || held) { k = { type: e[1], run: p[2], born: t, out: false, allow: 0 }; c.ents.set(id, k); }
+    if (!k || held) { k = { type: e[1], run: p[2], born: t, out: false, allow: 1 }; c.ents.set(id, k); }
     k.x = p[0]; k.z = p[1]; k.t = t;
     if (!k.out && t - k.born >= ENT_AGE) {
       // first shown to the others: not on top of one of them
@@ -181,8 +201,8 @@ function event(c, m) {
   if (d.k === 'scream') {
     // a death cry, from where the player is, to the players who could hear it
     const t = Date.now(); if (t - (c.screamT || 0) < 4000) return; c.screamT = t;
-    const o = JSON.stringify({ t: 'e', from: c.id, d: { k: 'scream', x: c.state.x, y: c.state.y + 1.5, z: c.state.z } });
-    for (const p of clients.values()) if (p !== c && p.state && p.ws.readyState === 1 && Math.hypot(p.state.x - c.state.x, p.state.z - c.state.z) < 80) p.ws.send(o);
+    const o = { t: 'e', from: c.id, d: { k: 'scream', x: c.state.x, y: c.state.y + 1.5, z: c.state.z } };
+    for (const p of clients.values()) if (p !== c && p.state && Math.hypot(p.state.x - c.state.x, p.state.z - c.state.z) < 80) send(p, o);
   } else if (d.k === 'rtc') {
     // voice chat hand-shake: one player to one nearby player, nothing but the hand-shake itself
     if (!okRate(c, 'rtc', 30) || typeof m.to !== 'string') return;
@@ -286,7 +306,7 @@ function track(c, s) {
   // new ground only, one square at a time
   const cell = Math.floor(s.x / CELL) + ',' + Math.floor(s.z / CELL);
   let step = 0;
-  if (cell !== c.cell) { c.cell = cell; if (!c.cells.has(cell)) { if (c.cells.size > 40000) c.cells.clear(); c.cells.add(cell); step = CELL; } }
+  if (cell !== c.cell) { c.cell = cell; if (!c.cells.has(cell)) { if (c.cells.size > 8000) c.cells.clear(); c.cells.add(cell); step = CELL; } }
   c.walk += step;
   const k = Math.floor(s.x / SECTOR_M) + ',' + Math.floor(s.z / SECTOR_M);
   if (k !== c.secK) { c.secK = k; if (c.entered.length < 12 && !c.entered.includes(k)) c.entered.push(k); }
@@ -321,23 +341,25 @@ const wss = new WebSocketServer({ server, maxPayload: 6000, perMessageDeflate: f
 wss.on('connection', (ws, req) => {
   // Cloudflare's own header cannot be forged through Cloudflare, so it wins. Only when it is the
   // Worker's own address (a proxied request from another zone) is the Worker's X-Level0-IP used.
-  const h = req.headers, cf = String(h['cf-connecting-ip'] || '');
-  const ip = String((cf && cf !== '2a06:98c0:3600::103' ? cf : h['x-level0-ip'] || cf) || h['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
+  const h = req.headers, cf = String(h['cf-connecting-ip'] || ''), key = String(h['x-level0-key'] || '');
+  const ours = KEY.length >= 16 && key.length === KEY.length && crypto.timingSafeEqual(Buffer.from(key), Buffer.from(KEY));
+  const ip = String((ours && h['x-level0-ip']) || cf || h['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim().slice(0, 64);
   const n = (perIp.get(ip) || 0) + 1;
   const now = Date.now(), recent = (connTimes.get(ip) || []).filter((x) => now - x < 60000);
   recent.push(now); connTimes.set(ip, recent);
   if (clients.size >= MAX_CLIENTS || n > MAX_PER_IP || recent.length > CONN_PER_MIN) { ws.close(1013, 'full'); return; }
   perIp.set(ip, n);
-  const c = { ws, ip, id: null, name: '', uid: '', state: null, changed: false, rate: {}, alive: true, pos: null, walk: 0, secK: '', cell: '', cells: new Set(), entered: [], allow: 3, ents: new Map(), flags: {} };
+  const c = { ws, ip, id: null, name: '', uid: '', state: null, changed: false, rate: {}, alive: true, pos: null, walk: 0, secK: '', cell: '', cells: new Set(), entered: [], allow: 3, ents: new Map(), over: 0, flags: {} };
   const hello = setTimeout(() => { if (!c.id) ws.close(); }, 8000);
   ws.on('pong', () => { c.alive = true; });
   ws.on('message', (buf) => {
+    if (!okRate(c, 'all', MSG_PER_S)) { if (++c.over > 300) ws.terminate(); return; }
     let m; try { m = JSON.parse(buf.toString()); } catch { return; }
     if (!m || typeof m !== 'object') return;
     if (!c.id) {
       if (m.t !== 'hello' || typeof m.token !== 'string' || m.token.length < 16 || m.token.length > 64) return ws.close();
       clearTimeout(hello);
-      c.id = rid(); c.name = cleanName(m.name); c.uid = crypto.createHash('sha256').update(m.token).digest('base64url').slice(0, 14);
+      c.id = rid(); c.uid = crypto.createHash('sha256').update(m.token).digest('base64url').slice(0, 14); c.name = freeName(cleanName(m.name), c.uid);
       const peers = []; for (const p of clients.values()) peers.push([p.id, p.name, p.state]);
       clients.set(c.id, c);
       const strip = (r) => { const { uid, a, ...rest } = r; return rest; };
