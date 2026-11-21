@@ -17,6 +17,7 @@ const MAX_PER_IP = Number(process.env.MAX_PER_IP || 8);
 // Shared with the Worker in front (deploy/worker.js). Only a request that carries it may say which
 // address the player has; anybody else's X-Level0-IP is ignored.
 const KEY = process.env.LEVEL0_KEY || '';
+const KEY_HASH = crypto.createHash('sha256').update(KEY).digest();
 const MSG_PER_S = 150;      // a game sends about 20 a second; far past that the connection is dropped
 const SECTOR_M = 28.8, AOI = 130;
 const BAD = /n[i1]gg|f[a4]gg|h[i1]tler|k[i1]ke|r[a4]pe|c[u\*]nt|naz[i1]/i;
@@ -107,7 +108,7 @@ function save() {
   const tmp = DATA + '.tmp';
   fs.writeFile(tmp, JSON.stringify(db), (e) => { if (!e) fs.rename(tmp, DATA, () => {}); });
 }
-setInterval(save, 10000);
+setInterval(() => { try { save(); } catch (e) { oops('save', e); } }, 10000);
 
 const clients = new Map();
 const perIp = new Map();
@@ -338,11 +339,21 @@ const server = http.createServer((req, res) => {
   res.writeHead(404); res.end();
 });
 const wss = new WebSocketServer({ server, maxPayload: 6000, perMessageDeflate: false });
-wss.on('connection', (ws, req) => {
+// Nothing a visitor sends may take the server down: every entry point is wrapped, and whatever still
+// slips through is written to the log instead of ending the process.
+let oopsN = 0;
+const oops = (where, e) => { if (++oopsN <= 200) console.error(new Date().toISOString(), 'error in', where + ':', e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e); };
+process.on('uncaughtException', (e) => oops('process', e));
+process.on('unhandledRejection', (e) => oops('promise', e));
+wss.on('error', (e) => oops('wss', e));
+server.on('clientError', (e, socket) => { try { socket.destroy(); } catch { /* gone */ } });
+wss.on('connection', (ws, req) => { try { onConnection(ws, req); } catch (e) { oops('connection', e); try { ws.terminate(); } catch { /* gone */ } } });
+function onConnection(ws, req) {
   // Cloudflare's own header cannot be forged through Cloudflare, so it wins. Only when it is the
   // Worker's own address (a proxied request from another zone) is the Worker's X-Level0-IP used.
   const h = req.headers, cf = String(h['cf-connecting-ip'] || ''), key = String(h['x-level0-key'] || '');
-  const ours = KEY.length >= 16 && key.length === KEY.length && crypto.timingSafeEqual(Buffer.from(key), Buffer.from(KEY));
+  // compared as two digests: always the same length, whatever bytes somebody puts in the header
+  const ours = KEY.length >= 16 && key.length > 0 && key.length < 200 && crypto.timingSafeEqual(crypto.createHash('sha256').update(key).digest(), KEY_HASH);
   const ip = String((ours && h['x-level0-ip']) || cf || h['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim().slice(0, 64);
   const n = (perIp.get(ip) || 0) + 1;
   const now = Date.now(), recent = (connTimes.get(ip) || []).filter((x) => now - x < 60000);
@@ -352,7 +363,8 @@ wss.on('connection', (ws, req) => {
   const c = { ws, ip, id: null, name: '', uid: '', state: null, changed: false, rate: {}, alive: true, pos: null, walk: 0, secK: '', cell: '', cells: new Set(), entered: [], allow: 3, ents: new Map(), over: 0, flags: {} };
   const hello = setTimeout(() => { if (!c.id) ws.close(); }, 8000);
   ws.on('pong', () => { c.alive = true; });
-  ws.on('message', (buf) => {
+  ws.on('message', (buf) => { try { onMessage(buf); } catch (e) { oops('message', e); try { ws.terminate(); } catch { /* gone */ } } });
+  const onMessage = (buf) => {
     if (!okRate(c, 'all', MSG_PER_S)) { if (++c.over > 300) ws.terminate(); return; }
     let m; try { m = JSON.parse(buf.toString()); } catch { return; }
     if (!m || typeof m !== 'object') return;
@@ -370,14 +382,14 @@ wss.on('connection', (ws, req) => {
     if (m.t === 'p') { if (!okRate(c, 'p', 20)) return; const s = cleanState(m.s); if (s) { c.state = s; c.changed = true; track(c, s); if (s.e) s.e = entities(c, s.e); } }
     else if (m.t === 'e') { if (okRate(c, 'e', 40)) event(c, m); }
     else if (m.t === 'c') collection(c, m);
-  });
+  };
   ws.on('close', () => {
     clearTimeout(hello);
     perIp.set(ip, (perIp.get(ip) || 1) - 1); if (perIp.get(ip) <= 0) perIp.delete(ip);
     if (c.id) { clients.delete(c.id); all({ t: 'l', id: c.id }); }
   });
   ws.on('error', () => {});
-});
+}
 
 // presence fan-out: nearby players 10 times a second, everybody every 2 seconds
 let tick = 0;
