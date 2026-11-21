@@ -41,7 +41,9 @@ export class Voice {
   }
   _drop(id) { const e = this.pcs.get(id); if (!e) return; try { e.pc.close(); } catch { /* closed */ } this.audio.detachVoice(id); this.pcs.delete(id); }
   async _signal(from, d) {
-    if (!this.enabled) return;
+    if (!this.enabled || !d) return;
+    // a call is only taken from a player who is close enough to be heard, and only so many at once
+    if (d.sdp && !this.pcs.has(from) && (!this.close || !this.close.has(from) || this.pcs.size >= MAX + 2)) return;
     if (d.sdp) {
       const e = this._pc(from);
       await e.pc.setRemoteDescription(d.sdp);
@@ -52,6 +54,7 @@ export class Voice {
   // near: [{ id, d, x, y, z, v }]  v = that player has voice switched on
   update(near) {
     if (!this.enabled) return;
+    this.close = new Set(near.filter((p) => p.v && p.d < FAR).map((p) => p.id));
     const want = near.filter((p) => p.v && p.d < NEAR).sort((a, b) => a.d - b.d).slice(0, MAX);
     for (const p of want) {
       if (this.pcs.has(p.id) || !(String(this.net.id) < String(p.id))) continue;

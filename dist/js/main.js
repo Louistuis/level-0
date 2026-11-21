@@ -18,7 +18,7 @@ import { CREDITS } from './assets.js';
 import { BIOME, BIOMES, biomeOf, ENTITIES, WATER_Y } from './biomes.js';
 import { S, SEC, SEC_M, MAPN, CEIL, ARTIFACTS, SIGNS, hash3, WORLD_SEED, clamp, damp, mod, sectorCode } from './util.js';
 
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 const REPO = 'https://github.com/Louistuis/level-0';
 const DONATE = 'https://www.buymeacoffee.com/louis9987';
 const Q = new URLSearchParams(location.search);
@@ -214,7 +214,17 @@ function titleInfo() {
 }
 function hookNet() {
   net.onClaimChange = (sx, sz, seed) => world.reseed(sx, sz, seed);
-  net.on('scream', (from, d) => { if (Math.hypot(d.x - pl.x, d.z - pl.z) < 60) audio.whisper(d.x, d.y, d.z, 'cry'); });
+  // a death cry is believed only from a player who is known to be about where it comes from, and not
+  // more often than someone can die
+  const cried = new Map();
+  net.on('scream', (from, d) => {
+    if (!d || ![d.x, d.y, d.z].every(Number.isFinite)) return;
+    const p = net.peers().get(from), ps = p && p.s, t = performance.now();
+    if (!ps || Math.hypot(ps.x - d.x, ps.z - d.z) > 12 || t - (cried.get(from) || -1e9) < 4000) return;
+    if (cried.size > 200) cried.clear();
+    cried.set(from, t);
+    if (Math.hypot(d.x - pl.x, d.z - pl.z) < 60) audio.whisper(d.x, d.y, d.z, 'cry');
+  });
   G.voice = new Voice(net, audio);
   net.start();
 }

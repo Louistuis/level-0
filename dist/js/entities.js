@@ -809,9 +809,13 @@ export class Entities {
     this.hitCd -= dt;
     let fear = 0, watching = false, dark = null, darkD = 1e9, run = 0;
     const me = T[0], all = [...this.mine, ...this.remote.values()];
-    const hit = (m, d, reach) => { if ((m.st === 'hit') && d < reach && this.hitCd <= 0 && game.alive) { this.hitCd = 1.2; game.hurt(DMG[m.type] || 0.4, CAUSE[m.type], m.x, m.z); } };
+    // A creature from somebody else's game can only hurt once it has behaved like one here: seen for a few
+    // seconds, and seen at a distance first. One that is simply put on top of a player never gets there.
+    const real = (m) => m.own || ((m.age || 0) >= 3 && (m.maxD || 0) >= 10);
+    const hit = (m, d, reach) => { if ((m.st === 'hit') && d < reach && this.hitCd <= 0 && game.alive && real(m)) { this.hitCd = 1.2; game.hurt(DMG[m.type] || 0.4, CAUSE[m.type], m.x, m.z); } };
     for (const m of all) {
       const d = Math.hypot(m.x - pl.x, m.z - pl.z);
+      if (!m.own && m.type !== 'R') { m.age = (m.age || 0) + dt; if (d > (m.maxD || 0)) m.maxD = d; }
       const near = clamp(1 - d / 30, 0, 1);
       const iSee = game.alive && this.sees(me, m.x, m.y + 1.2, m.z, 0.6, 45);
       const toMe = Math.atan2(-(pl.x - m.x), -(pl.z - m.z));
@@ -891,11 +895,12 @@ export class Entities {
         if (m.st === 'fade') m.obj.position.y = m.y - Math.min(2.5, (m.fadeT || 0) * 1.2);
         const g = this._runGeo(m.run), [s, c] = this._along(g, pl.x, pl.z), inside = this._inRun(m.run, pl.x, pl.z);
         const gap = s - (m.s ?? 0);
+        if (!m.own) { m.age = (m.age || 0) + dt; if (inside && gap > (m.maxD || 0)) m.maxD = gap; }
         if (inside && game.alive) {
           run = Math.max(run, clamp(1 - gap / 40, 0.15, 1));
           fear = Math.max(fear, clamp(1.1 - gap / 30, 0.4, 1));
           if (gap < 8) { m.nearT = (m.nearT || 0) - dt; if (m.nearT <= 0) { m.nearT = 6; this.audio.play('hordeNear', { pos: [m.x, m.y + 1.4, m.z] }); } }
-          if (gap < 0.4 && m.st !== 'fade') game.hurt(5, CAUSE.R, m.x, m.z);
+          if (gap < 0.4 && m.st !== 'fade' && real(m)) game.hurt(5, CAUSE.R, m.x, m.z);
         }
         this.audio.entity(m.id, AUD('R'), m.x, m.y + 1.4, m.z, { near: inside ? clamp(1 - gap / 40, 0, 1) : near * 0.5, moving: 1, chase: 1, rush: clamp(((m.v || 3) - 2.4) / 2, 0, 1) });
       }
@@ -926,9 +931,11 @@ export class Entities {
   syncRemote(peers, dt) {
     const seen = new Set();
     for (const [, p] of peers) {
-      const list = p.s && p.s.e; if (!Array.isArray(list)) continue;
+      const all = p.s && p.s.e; if (!Array.isArray(all)) continue;
+      const list = all.length > 8 ? all.slice(0, 8) : all; // nobody's game runs more than a handful
       for (const e of list) {
         if (!Array.isArray(e) || !KNOWN.has(e[1])) continue; // types from a newer (or older) version: ignore
+        if (typeof e[0] !== 'string' || ![e[2], e[3], e[4], e[5]].every(Number.isFinite) || typeof e[6] !== 'string') continue;
         const id = e[0]; seen.add(id);
         let m = this.remote.get(id);
         if (!m) {
@@ -940,14 +947,19 @@ export class Entities {
         // eased toward the latest update; the speed the legs use is the speed it really moves at
         const ox = m.x, oz = m.z, oy = m.yaw;
         m.x = damp(m.x, e[2], 8, dt); m.y = damp(m.y, e[3], 8, dt); m.z = damp(m.z, e[4], 8, dt);
-        if (Math.hypot(e[2] - m.x, e[4] - m.z) > 8) { m.x = e[2]; m.z = e[4]; }
+        if (Math.hypot(e[2] - m.x, e[4] - m.z) > 8) { m.x = e[2]; m.z = e[4]; m.age = 0; m.maxD = 0; } // it jumped: it has to earn its teeth again (see _draw)
         m.yaw += angDiff(m.yaw, e[5]) * (1 - Math.exp(-8 * dt)); m.st = e[6];
         const id2 = Math.max(dt, 1e-3);
         m.rv = damp(m.rv || 0, Math.min(8, Math.hypot(m.x - ox, m.z - oz) / id2), 6, dt);
         m.turn = damp(m.turn || 0, angDiff(oy, m.yaw) / id2, 6, dt);
         if (typeof e[7] === 'number') m.k = e[7];
         if (m.type === 'M') { if (typeof e[8] === 'string') m.alias = e[8]; m.reveal = e[9] ? 1 : 0; }
-        if (m.type === 'R') { m.s = typeof e[7] === 'number' ? e[7] : m.s; m.v = e[11] || m.v; m.fadeT = m.st === 'fade' ? (m.fadeT || 0) + dt : 0; m.x = e[2]; m.z = e[4]; }
+        if (m.type === 'R') {
+          // the horde's front may only advance the way a horde runs: a front that leaps forward is not believed
+          const ns = Number.isFinite(e[7]) ? e[7] : m.s, tn = performance.now() / 1000;
+          if (m.s !== undefined && ns !== m.s) { if (ns - m.s > 7 * Math.max(0.05, tn - (m.sT || tn)) + 1.5) { m.age = 0; m.maxD = 0; } m.sT = tn; }
+          else if (m.sT === undefined) m.sT = tn;
+          m.s = ns; m.v = Number.isFinite(e[11]) ? e[11] : m.v; m.fadeT = m.st === 'fade' ? (m.fadeT || 0) + dt : 0; m.x = e[2]; m.z = e[4]; }
       }
     }
     for (const [id, m] of this.remote) if (!seen.has(id)) { this._remove(m); this.remote.delete(id); }

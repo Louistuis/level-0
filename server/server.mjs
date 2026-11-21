@@ -39,7 +39,7 @@ function hash3(a, b, c) {
   h = (h ^ (h >>> 16)) * 2246822519;
   return (h ^ (h >>> 15)) >>> 0;
 }
-const seedOf = (k) => { const [sx, sz] = k.split(',').map(Number); return hash3(sx, sz, WORLD_SEED ^ 0x1234); };           // new leaderboard names per address per day
+const seedOf = (k) => { const [sx, sz] = k.split(',').map(Number); return hash3(sx, sz, WORLD_SEED ^ 0x1234); };
 const capSectors = (w) => Math.floor(w / 16) + 4;    // a sector is 28.8 m across
 // sectors that load around a player get their name on them too: a full view is about 50, then roughly
 // seven more for every sector walked. One allowance per address (a school shares one), refilled over time,
@@ -84,6 +84,17 @@ function makeSector(c, k) {
   db.sector.push(r); sectorByK.set(k, r); claimsByUid.set(c.uid, (claimsByUid.get(c.uid) || 0) + 1); dirty = true;
   return r;
 }
+// ---- what one player can do to the others is checked here too -----------------------------------
+// Chalk signs: one of the eight marks, placed where the player really is, a few per address.
+const SIGN_IDS = new Set(['fwd', 'back', 'safe', 'danger', 'dead', 'exit', 'eye', 'water']);
+const SIGN_WALK = 10, SIGNS_PER_HOUR = 12, SIGNS_PER_DAY = 40, SIGNS_NEAR = 3, SIGNS_MAX = 4000;
+const signBudget = new Map(); // address -> [times of the signs it placed in the last day]
+// Creatures a player's game is simulating are shown to the others only when they behave like creatures:
+// near their owner, moving no faster than a creature can, having existed for a few seconds, and not
+// appearing next to somebody else. One that jumps starts again from nothing.
+const ENT_RANGE = 150, ENT_V = 14, ENT_AGE = 3000, ENT_CLEAR = 12, CELL_M = 0.6, HORDE_V = 5.5;
+const CONN_PER_MIN = 30;
+const connTimes = new Map(); // address -> times of its recent connections
 const pubStat = (r) => { const { uid, walk, ...rest } = r; return rest; };
 const pubSector = (r) => { const { uid, n, ...rest } = r; return rest; };
 function save() {
@@ -127,6 +138,64 @@ function cleanEnt(e) {
   return o;
 }
 
+// Where a creature really is. The horde's danger is not where it is drawn but how far along its
+// corridor it has come, so that is the point that gets checked.
+function entPoint(e) {
+  if (e[1] === 'R') {
+    const r = e[10]; if (!r || !num(e[7], -50, 5000)) return null;
+    const ax = (r[0] + 0.5) * CELL_M, az = (r[1] + 0.5) * CELL_M, bx = (r[2] + 0.5) * CELL_M, bz = (r[3] + 0.5) * CELL_M, L = Math.hypot(bx - ax, bz - az) || 1;
+    if (L > 400) return null;
+    return [ax + (bx - ax) / L * e[7], az + (bz - az) / L * e[7], r.join(',')];
+  }
+  return [e[2], e[4], ''];
+}
+function entities(c, list) {
+  const t = Date.now(), out = [], seen = new Set(), held = t < (c.holdT || 0);
+  for (const e of list) {
+    const id = e[0]; if (seen.has(id)) continue; seen.add(id);
+    const p = entPoint(e); if (!p) continue;
+    if (Math.hypot(p[0] - c.state.x, p[1] - c.state.z) > ENT_RANGE) { c.ents.delete(id); continue; }
+    let k = c.ents.get(id);
+    const vmax = e[1] === 'R' ? HORDE_V : ENT_V;
+    if (k && k.type === e[1] && k.run === p[2]) {
+      k.allow = Math.min(vmax * 1.5, k.allow + vmax * (t - k.t) / 1000);
+      const d = Math.hypot(p[0] - k.x, p[1] - k.z);
+      if (d > k.allow + 1) k = null; else k.allow = Math.max(0, k.allow - d);
+    } else k = null;
+    if (!k || held) { k = { type: e[1], run: p[2], born: t, out: false, allow: 0 }; c.ents.set(id, k); }
+    k.x = p[0]; k.z = p[1]; k.t = t;
+    if (!k.out && t - k.born >= ENT_AGE) {
+      // first shown to the others: not on top of one of them
+      let clear = true;
+      for (const o of clients.values()) if (o !== c && o.state && Math.hypot(o.state.x - k.x, o.state.z - k.z) < ENT_CLEAR) { clear = false; break; }
+      if (clear) k.out = true;
+    }
+    if (k.out) out.push(e);
+  }
+  for (const id of c.ents.keys()) if (!seen.has(id)) c.ents.delete(id);
+  return out;
+}
+// Events between players: only the two the game has, rebuilt from what the server knows.
+function event(c, m) {
+  const d = m.d; if (!d || typeof d !== 'object' || !c.state) return;
+  if (d.k === 'scream') {
+    // a death cry, from where the player is, to the players who could hear it
+    const t = Date.now(); if (t - (c.screamT || 0) < 4000) return; c.screamT = t;
+    const o = JSON.stringify({ t: 'e', from: c.id, d: { k: 'scream', x: c.state.x, y: c.state.y + 1.5, z: c.state.z } });
+    for (const p of clients.values()) if (p !== c && p.state && p.ws.readyState === 1 && Math.hypot(p.state.x - c.state.x, p.state.z - c.state.z) < 80) p.ws.send(o);
+  } else if (d.k === 'rtc') {
+    // voice chat hand-shake: one player to one nearby player, nothing but the hand-shake itself
+    if (!okRate(c, 'rtc', 30) || typeof m.to !== 'string') return;
+    const p = clients.get(m.to); if (!p || p === c || !p.state || Math.hypot(p.state.x - c.state.x, p.state.z - c.state.z) > 70) return;
+    const str = (v, n) => typeof v === 'string' && v.length <= n;
+    let o = null;
+    if (d.bye) o = { k: 'rtc', bye: 1 };
+    else if (d.sdp && typeof d.sdp === 'object' && (d.sdp.type === 'offer' || d.sdp.type === 'answer') && str(d.sdp.sdp, 5000)) o = { k: 'rtc', sdp: { type: d.sdp.type, sdp: d.sdp.sdp } };
+    else if (d.ice && typeof d.ice === 'object' && str(d.ice.candidate, 600)) o = { k: 'rtc', ice: { candidate: d.ice.candidate, sdpMid: str(d.ice.sdpMid, 16) ? d.ice.sdpMid : null, sdpMLineIndex: Number.isInteger(d.ice.sdpMLineIndex) && d.ice.sdpMLineIndex >= 0 && d.ice.sdpMLineIndex < 16 ? d.ice.sdpMLineIndex : null, usernameFragment: str(d.ice.usernameFragment, 64) ? d.ice.usernameFragment : null } };
+    if (o) send(p, { t: 'e', from: c.id, d: o });
+  }
+}
+
 function collection(c, m) {
   if (!okRate(c, 'col', 12)) return;
   const name = m.c, d = m.d || {};
@@ -147,13 +216,22 @@ function collection(c, m) {
     send(c, { t: 'c', op: 'create', c: name, r: pubSector(r), rid: m.rid });
   } else if (name === 'sign_v1') {
     if (m.op === 'create') {
-      if (typeof d.g !== 'string' || d.g.length > 8 || !num(d.x, -1e7, 1e7) || !num(d.y, -100, 100) || !num(d.z, -1e7, 1e7) || !num(d.r, -1e4, 1e4)) return;
+      if (!SIGN_IDS.has(d.g) || !num(d.x, -1e7, 1e7) || !num(d.y, -100, 100) || !num(d.z, -1e7, 1e7) || !num(d.r, -1e4, 1e4)) return;
       if (!c.state || Math.hypot(d.x - c.state.x, d.z - c.state.z) > 6) return;
+      // by someone who is walking around in there (not a script that just connected or just teleported),
+      // not on top of other signs, and only so many from one address
+      const t = Date.now();
+      if (walked(c) < SIGN_WALK || t < (c.holdT || 0) || t - (c.signT || 0) < 2000) { flag(c, 'sign'); return; }
+      if (db.sign.filter((r) => Math.hypot(r.x - d.x, r.z - d.z) < 3).length >= SIGNS_NEAR) { flag(c, 'sign (too many in one spot)'); return; }
+      const times = (signBudget.get(c.ip) || []).filter((x) => t - x < DAY);
+      if (times.length >= SIGNS_PER_DAY || times.filter((x) => t - x < 3600000).length >= SIGNS_PER_HOUR) { flag(c, 'sign (too many from one address)'); return; }
+      times.push(t); signBudget.set(c.ip, times); c.signT = t;
       const mine = db.sign.filter((r) => r.uid === c.uid);
       if (mine.length >= 30) { const old = mine[0]; db.sign.splice(db.sign.indexOf(old), 1); all({ t: 'c', op: 'delete', c: name, id: old.id }); }
-      const r = { id: rid(), g: d.g, x: d.x, y: d.y, z: d.z, r: d.r, username: c.name, uid: c.uid, created_at: new Date().toISOString() };
+      if (db.sign.length >= SIGNS_MAX) { const old = db.sign.shift(); all({ t: 'c', op: 'delete', c: name, id: old.id }); }
+      const r = { id: rid(), g: d.g, x: d.x, y: d.y, z: d.z, r: d.r, username: c.name, uid: c.uid, a: ipTag(c.ip), created_at: new Date().toISOString() };
       db.sign.push(r); dirty = true;
-      const pub = { ...r }; delete pub.uid;
+      const pub = { ...r }; delete pub.uid; delete pub.a;
       all({ t: 'c', op: 'create', c: name, r: pub }, c); send(c, { t: 'c', op: 'create', c: name, r: pub, rid: m.rid });
     } else if (m.op === 'delete') {
       const i = db.sign.findIndex((r) => r.id === m.id && r.uid === c.uid);
@@ -246,9 +324,11 @@ wss.on('connection', (ws, req) => {
   const h = req.headers, cf = String(h['cf-connecting-ip'] || '');
   const ip = String((cf && cf !== '2a06:98c0:3600::103' ? cf : h['x-level0-ip'] || cf) || h['x-forwarded-for'] || req.socket.remoteAddress || '').split(',')[0].trim();
   const n = (perIp.get(ip) || 0) + 1;
-  if (clients.size >= MAX_CLIENTS || n > MAX_PER_IP) { ws.close(1013, 'full'); return; }
+  const now = Date.now(), recent = (connTimes.get(ip) || []).filter((x) => now - x < 60000);
+  recent.push(now); connTimes.set(ip, recent);
+  if (clients.size >= MAX_CLIENTS || n > MAX_PER_IP || recent.length > CONN_PER_MIN) { ws.close(1013, 'full'); return; }
   perIp.set(ip, n);
-  const c = { ws, ip, id: null, name: '', uid: '', state: null, changed: false, rate: {}, alive: true, pos: null, walk: 0, secK: '', cell: '', cells: new Set(), entered: [], allow: 3, flags: {} };
+  const c = { ws, ip, id: null, name: '', uid: '', state: null, changed: false, rate: {}, alive: true, pos: null, walk: 0, secK: '', cell: '', cells: new Set(), entered: [], allow: 3, ents: new Map(), flags: {} };
   const hello = setTimeout(() => { if (!c.id) ws.close(); }, 8000);
   ws.on('pong', () => { c.alive = true; });
   ws.on('message', (buf) => {
@@ -260,17 +340,14 @@ wss.on('connection', (ws, req) => {
       c.id = rid(); c.name = cleanName(m.name); c.uid = crypto.createHash('sha256').update(m.token).digest('base64url').slice(0, 14);
       const peers = []; for (const p of clients.values()) peers.push([p.id, p.name, p.state]);
       clients.set(c.id, c);
-      const strip = (r) => { const { uid, ...rest } = r; return rest; };
+      const strip = (r) => { const { uid, a, ...rest } = r; return rest; };
       send(c, { t: 'w', id: c.id, name: c.name, peers, cols: { sector_v1: db.sector.map(pubSector), sign_v1: db.sign.map(strip), stat_v1: db.stat.map(pubStat) } });
       all({ t: 'j', id: c.id, name: c.name }, c);
       return;
     }
-    if (m.t === 'p') { if (!okRate(c, 'p', 20)) return; const s = cleanState(m.s); if (s) { c.state = s; c.changed = true; track(c, s); } }
-    else if (m.t === 'e') {
-      if (!okRate(c, 'e', 40) || !m.d || typeof m.d !== 'object') return;
-      const o = { t: 'e', from: c.id, d: m.d };
-      if (typeof m.to === 'string') { const p = clients.get(m.to); if (p) send(p, o); } else all(o, c);
-    } else if (m.t === 'c') collection(c, m);
+    if (m.t === 'p') { if (!okRate(c, 'p', 20)) return; const s = cleanState(m.s); if (s) { c.state = s; c.changed = true; track(c, s); if (s.e) s.e = entities(c, s.e); } }
+    else if (m.t === 'e') { if (okRate(c, 'e', 40)) event(c, m); }
+    else if (m.t === 'c') collection(c, m);
   });
   ws.on('close', () => {
     clearTimeout(hello);
@@ -298,6 +375,14 @@ setInterval(() => {
   for (const m of moved) m.changed = false;
 }, 100);
 setInterval(() => { for (const c of clients.values()) { if (!c.alive) { c.ws.terminate(); continue; } c.alive = false; try { c.ws.ping(); } catch { /* gone */ } } }, 30000);
+// forget addresses that have been quiet for a day
+setInterval(() => {
+  const t = Date.now();
+  for (const [ip, a] of connTimes) if (!a.length || t - a[a.length - 1] > 60000) connTimes.delete(ip);
+  for (const [ip, a] of signBudget) if (!a.length || t - a[a.length - 1] > DAY) signBudget.delete(ip);
+  for (const [ip, a] of newRows) if (!a.length || t - a[a.length - 1] > DAY) newRows.delete(ip);
+  for (const [ip, b] of claimBudget) if (t - b.t > DAY) claimBudget.delete(ip);
+}, 3600000);
 
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { dirty && fs.writeFileSync(DATA, JSON.stringify(db)); process.exit(0); });
 server.listen(PORT, HOST, () => console.log(`level0 server on ${HOST}:${PORT}, ${db.sector.length} sectors stored`));

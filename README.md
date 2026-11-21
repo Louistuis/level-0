@@ -13,7 +13,7 @@ Endless yellow rooms, buzzing lights, damp carpet. You see it through the visor 
 
 No game engine and no build step. The world, the light, every texture and every sound are generated in your browser. The whole game is 3.5 MB.
 
-*Current version: 0.3.1. Every picture on this page was captured from 0.3.0.*
+*Current version: 0.3.2. Every picture on this page was captured from 0.3.0.*
 
 ## Contents
 
