@@ -13,7 +13,7 @@ Endless yellow rooms, buzzing lights, damp carpet. You see it through the visor 
 
 No game engine and no build step. The world, the light, every texture and every sound are generated in your browser. The whole game is 3.5 MB.
 
-*Current version: 0.3.3. Every picture on this page was captured from 0.3.0.*
+*Current version: 0.3.4. Every picture on this page was captured from 0.3.0.*
 
 ## Contents
 
@@ -110,7 +110,7 @@ Scattered around the level: almond water, spare cells for the flashlight, and th
 ## Other people
 
 - You see everyone else's suit and flashlight, live, in the same rooms.
-- **Voice:** hold V to talk to people near you. It is opt-in and goes directly between players.
+- **Voice:** switched off for now. Proximity voice went directly between players, which shows them each other's network address. It returns when the sound runs through a relay.
 - **Chalk signs:** press Q to leave a sign on the floor for everyone who comes after you.
 - **The leaderboard** counts sectors found, objects, escapes and how far out you got.
 - **No account.** On the own-server edition you type a name for the suit and that is all. The server keeps that name with the sectors you found, your signs and your stats. On WebSim the game uses your WebSim name.
@@ -129,7 +129,6 @@ Scattered around the level: almond water, spare cells for the flashlight, and th
 | Q | Leave a chalk sign |
 | M | Floor survey (map) |
 | R | Handheld radar |
-| V | Hold to talk |
 | Tab | Players and leaderboard |
 | Esc | Pause |
 
@@ -144,7 +143,7 @@ About 16,500 lines of plain JavaScript modules, [three.js](https://threejs.org) 
 - **Textures:** wallpaper, carpet, ceiling tiles, concrete, hotel wallpaper, pool tile and the writing on the walls are all painted in code when the game loads.
 - **Sound:** every sound is synthesized with WebAudio. There is not one audio file. Each level has its own ambience, reverb and footsteps, and each entity its own voice.
 - **Entities:** modelled and animated in code, each with its own brain, on top of one director that decides when anything happens.
-- **Multiplayer:** two transports behind one interface. Inside WebSim the game uses WebSim's rooms and database. Anywhere else it talks to a small WebSocket relay (`server/server.mjs`, under 200 lines) that keeps the world in one JSON file. Voice is peer to peer over WebRTC.
+- **Multiplayer:** two transports behind one interface. Inside WebSim the game uses WebSim's rooms and database. Anywhere else it talks to a small WebSocket server (`server/server.mjs`) that keeps the world in one JSON file. The server does not take a browser's word for things: it counts the leaderboard itself from how players move, and checks signs, events and creatures before passing them on. Whatever arrives from other players is rebuilt from checked values in the game as well, and only the creatures of your own game can hurt you.
 - **Files it loads:** its own typeface (Troffer, drawn for the game) and a 1.7 MB pack of 3D models (two suits, an exit door, furniture and fittings), credited in [CREDITS.md](CREDITS.md).
 
 ```

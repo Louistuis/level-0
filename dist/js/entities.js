@@ -831,7 +831,10 @@ export class Entities {
     const me = T[0], all = [...this.mine, ...this.remote.values()];
     // A creature from somebody else's game can only hurt once it has behaved like one here: seen for a few
     // seconds, and seen at a distance first. One that is simply put on top of a player never gets there.
-    const real = (m) => m.own || ((m.age || 0) >= 3 && (m.maxD || 0) >= 10 && (m.type !== 'R' || m.runOk));
+    // Only the creatures of your own game can hurt you, drain you or put the lights out. The ones other
+    // players' games run are shown and heard, but what they are is somebody else's word, and that word is
+    // not taken for anything that costs you. (The checks in syncRemote stay: they keep what you see sane.)
+    const real = (m) => m.own === true;
     let drained = false; // what other players' creatures take from your nerves does not add up
     const hit = (m, d, reach) => { if ((m.st === 'hit') && d < reach && this.hitCd <= 0 && game.alive && real(m)) { this.hitCd = 1.2; game.hurt(DMG[m.type] || 0.4, CAUSE[m.type], m.x, m.z); } };
     for (const m of all) {

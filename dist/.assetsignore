@@ -1,0 +1,9 @@
+# pages and scripts that exist for development only: not published on backrooms.lou15.com
+audio-test.html
+pack-test.html
+ui-demo.html
+js/pack-test.js
+js/model-test.js
+js/ui-demo.js
+.websim.json
+.assetsignore

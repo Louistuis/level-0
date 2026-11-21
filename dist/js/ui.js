@@ -481,7 +481,7 @@ export function createUI(opts = {}) {
   function howtoHtml() {
     const rows = [
       [['W', 'A', 'S', 'D'], 'Move'], [['Mouse'], 'Look'], [['Shift'], 'Sprint'], [['C', 'Ctrl'], 'Crouch'],
-      [['F'], 'Flashlight'], [['E'], 'Interact'], [['Q'], 'Leave a chalk sign'], [['V'], 'Hold to talk'],
+      [['F'], 'Flashlight'], [['E'], 'Interact'], [['Q'], 'Leave a chalk sign'], ...(o.voice ? [[['V'], 'Hold to talk']] : []),
       [['M'], 'Survey map'], [['R'], 'Handheld radar and map'], [['Tab'], 'Players'], [['Esc'], 'Pause'],
     ];
     const keys = (ks) => ks.map((k, i) => `${i && ks.length === 2 ? '<span class="or">or</span>' : ''}<kbd>${k}</kbd>`).join('');
@@ -580,9 +580,9 @@ export function createUI(opts = {}) {
     const touchOn = touch.enabled && st.inGame && !blocking;
     R.touch.classList.toggle('is-on', touchOn);
     if (!touchOn) { endStick(); lookPointer = null; }
-    R.touch.querySelector('.tb-voice').hidden = !settings.voice;
+    R.touch.querySelector('.tb-voice').hidden = !(settings.voice && o.voice);
     root.classList.toggle('show-fps', !!settings.showFps);
-    root.classList.toggle('voice-on', !!settings.voice);
+    root.classList.toggle('voice-on', !!(settings.voice && o.voice));
     root.classList.toggle('touch-dev', touch.enabled);
     root.classList.toggle('reduce-visor', !settings.visor);
   }
@@ -1204,7 +1204,7 @@ export function createUI(opts = {}) {
       </section>
       <section class="sgroup"><h3 class="sgroup-h">Sound</h3>
         ${slider('volume', 'Volume')}
-        ${toggle('voice', 'Proximity voice', 'Others hear you when close. Hold V')}
+        ${o.voice ? toggle('voice', 'Proximity voice', 'Others hear you when close. Hold V') : ''}
       </section>
       <button type="button" class="btn-text" data-reset>Restore defaults</button>`;
     syncSettings();

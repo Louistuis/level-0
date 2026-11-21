@@ -18,7 +18,10 @@ import { CREDITS } from './assets.js';
 import { BIOME, BIOMES, biomeOf, ENTITIES, WATER_Y } from './biomes.js';
 import { S, SEC, SEC_M, MAPN, CEIL, ARTIFACTS, SIGNS, hash3, WORLD_SEED, clamp, damp, mod, sectorCode } from './util.js';
 
-const VERSION = '0.3.3';
+const VERSION = '0.3.4';
+// Voice is switched off. It is peer to peer: two players who talk learn each other's network address.
+// It comes back when the sound goes through a relay instead (see voice.js).
+const VOICE = false;
 const REPO = 'https://github.com/Louistuis/level-0';
 const DONATE = 'https://www.buymeacoffee.com/louis9987';
 const Q = new URLSearchParams(location.search);
@@ -35,7 +38,7 @@ const FIELD_NOTES = {
   W: 'Someone with no face at the end of the hall. Leave it alone and keep your lamp off it.',
   R: 'Level ! only. It does not stop. Neither should you.',
 };
-const ui = createUI({ version: VERSION, edition, repoUrl: REPO, donateUrl: DONATE, artifacts: ARTIFACTS, signs: SIGNS, credits: CREDITS,
+const ui = createUI({ voice: VOICE, version: VERSION, edition, repoUrl: REPO, donateUrl: DONATE, artifacts: ARTIFACTS, signs: SIGNS, credits: CREDITS,
   places: BIOMES.map((b) => ({ id: b.id, level: b.level, name: b.name, blurb: b.blurb })),
   entities: Object.keys(ENTITIES).map((code) => ({ code, name: ENTITIES[code].name, note: FIELD_NOTES[code] || '' })) });
 const set = ui.settings;
@@ -145,7 +148,7 @@ function toggleFlash() {
 }
 function openWheel() { G.wheel = true; keys.clear(); if (locked()) document.exitPointerLock(); ui.openSigns(); }
 async function talk(on) {
-  if (!net || net.kind === 'offline') return;
+  if (!VOICE || !net || net.kind === 'offline') return;
   if (on && !set.voice) { ui.toast({ title: 'VOICE IS OFF', sub: 'Turn it on in Settings.', kind: 'info' }); return; }
   if (on && G.voice && !G.voice.enabled) { const ok = await G.voice.enable(); ui.toast(ok ? { title: 'VOICE READY', sub: 'Hold V to talk to people nearby.', kind: 'info' } : { title: 'NO VOICE', sub: G.voice.error || 'Microphone unavailable.', kind: 'danger' }); return; }
   G.talk = !!on; if (G.voice) G.voice.setTalking(on); if (on) audio.play('radio', { vol: 0.5 });
@@ -225,7 +228,7 @@ function hookNet() {
     cried.set(from, t);
     if (Math.hypot(d.x - pl.x, d.z - pl.z) < 60) audio.whisper(d.x, d.y, d.z, 'cry');
   });
-  G.voice = new Voice(net, audio);
+  G.voice = VOICE ? new Voice(net, audio) : null;
   net.start();
 }
 async function boot() {
@@ -557,6 +560,7 @@ function loop(now) {
 addEventListener('beforeunload', () => { if (G.state === 'play') writeSave(); });
 document.addEventListener('visibilitychange', () => { last = performance.now(); if (document.hidden && G.state === 'play') writeSave(); });
 
-window.__g = { G, R, world, pl, ents, anom, ui, audio, mats, cam, step, map, hand, get net() { return net; }, manual(v) { manual = v; }, sim(n, dt = 1 / 60) { for (let i = 0; i < n; i++) step(dt); return [G.state, +pl.x.toFixed(2), +pl.y.toFixed(2), +pl.z.toFixed(2), world.ready]; } };
+// test hooks: only on a developer's own machine
+if (/^(localhost|127\.0\.0\.1|\[::1\])$/.test(location.hostname)) window.__g = { G, R, world, pl, ents, anom, ui, audio, mats, cam, step, map, hand, get net() { return net; }, manual(v) { manual = v; }, sim(n, dt = 1 / 60) { for (let i = 0; i < n; i++) step(dt); return [G.state, +pl.x.toFixed(2), +pl.y.toFixed(2), +pl.z.toFixed(2), world.ready]; } };
 boot().catch((e) => { console.error(e); ui.setTitleStatus('Something went wrong while starting. Reload to try again.', null); });
 requestAnimationFrame(loop);
