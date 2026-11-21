@@ -819,7 +819,7 @@ export class AudioEngine {
     const n = this._gain(1);
     this._mkBed(this._white, n, [5, 10]);
     this.bAir = this._bq('bandpass', 1300, 0.9);
-    const mask = this._bq('peaking', 1150, 3, 8);
+    const mask = this._bq('peaking', 1150, 3, 6);
     const boom = this._bq('peaking', 170, 1, 4);
     this.bLP = this._bq('lowpass', 4500, 0.6);
     this.bAM = this._gain(1);
@@ -1180,8 +1180,11 @@ export class AudioEngine {
     const bpm = (13 + 27 * drive) * rnd(0.88, 1.12);
     const cyc = 60 / bpm;
     const depth = rnd(0.78, 1.15);
-    const pIn = (0.11 + 0.33 * drive) * depth;
-    const pEx = (0.13 + 0.4 * drive) * depth * rnd(0.85, 1.1);
+    // The pace follows the body at once, the loudness builds over several breaths: it never jumps from
+    // quiet to full in one breath (hard on in-ear headphones), and the top is about a third lower than it was.
+    const loud = b.loud = b.loud === undefined ? drive * 0.4 : b.loud + clamp(drive - b.loud, -0.4, 0.16);
+    const pIn = (0.1 + 0.2 * loud) * depth;
+    const pEx = (0.12 + 0.24 * loud) * depth * rnd(0.85, 1.1);
     const inD = cyc * lerp(0.34, 0.42, drive) * rnd(0.9, 1.1);
     const exD = cyc * lerp(0.42, 0.48, drive) * rnd(0.9, 1.1);
     const te = t + inD + rnd(0.03, 0.08);
@@ -1210,8 +1213,8 @@ export class AudioEngine {
     g.setTargetAtTime(pEx, te, exD * 0.18);
     g.setTargetAtTime(0, te + exD * 0.55, exD * 0.22);
 
-    this._valve(t - 0.01, 0.5 + 0.4 * drive);
-    this._valve(te - 0.01, 0.8 + 0.3 * drive);
+    this._valve(t - 0.01, 0.45 + 0.3 * loud);
+    this._valve(te - 0.01, 0.7 + 0.25 * loud);
     b.next = t + cyc;
     b.restAt = te + exD * 0.7;
     b.drive = drive;

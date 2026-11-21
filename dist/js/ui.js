@@ -386,7 +386,7 @@ export function createUI(opts = {}) {
           ${extLink(o.donateUrl, 'foot-link tube', `<span class="fl-h">${icon('pizza', 'fl-ico')}<span>Buy me a pizza</span>${icon('external', 'ext')}</span><span class="fl-s">Made by one person. Pizza keeps the lights on.</span>`)}
         </div>
         <div class="foot-meta">
-          <span class="cnote">Horror. Flashing lights. Headphones recommended.</span>
+          <span class="cnote">Horror. Flashing lights. Sudden loud sounds: check your volume first. Headphones recommended.</span>
           <span class="foot-row">
             <span>v${esc(o.version)}</span>
             ${lou15 ? '' : `<span class="websim" data-r="websim"><img src="assets/websim-logo.png" alt="made on websim" data-r="websimImg" height="26"><span class="websim-t" data-r="websimT" hidden>made on websim</span></span>`}
